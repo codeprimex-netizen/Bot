@@ -2,27 +2,65 @@
 
 ## Introduction
 
-WhatsApp Auto Messenger Bot ek Node.js based automation platform hai jo WhatsApp Multi-Device protocol (Baileys) ke through multiple WhatsApp numbers ko ek hi control panel se manage karta hai. Platform ka scope: multi-session management, single/dual/bulk messaging with delivery tracking, scheduled campaigns, group aur channel administration, auto welcome messages, member number extraction, auto tagging, comprehensive error reporting, aur ek web-based dashboard.
+WhatsApp Auto Messenger Bot ek **PHP + MySQL** based automation platform hai jo multiple WhatsApp numbers ko ek hi web control panel se manage karta hai. Platform ka scope: multi-session management, single/dual/bulk messaging with delivery tracking, scheduled campaigns, group aur channel administration, auto welcome messages, member number extraction, auto tagging, comprehensive error reporting, aur web dashboard.
 
-Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har requirement ke acceptance criteria EARS format (`WHEN … THEN the system SHALL …`) mein likhe gaye hain taaki implementation aur testing dono unambiguous rahen.
+**Deployment target:** `https://bot.getxtrra.in`
+
+Yeh document 37 features ko 35 formal requirements mein translate karta hai. Har requirement ke acceptance criteria EARS format (`WHEN … THEN the system SHALL …`) mein hain taaki implementation aur testing dono unambiguous rahen.
+
+---
+
+## Technology Constraints
+
+| Layer | Technology |
+|---|---|
+| Language | PHP 8.3 |
+| Framework | Laravel 11 |
+| Database | MySQL 8.0 |
+| Queue | Laravel Queue — MySQL `jobs` table driver |
+| Cache / Locks | Laravel Cache — MySQL `cache` table driver |
+| Scheduler | Laravel Scheduler (single system cron entry) |
+| Frontend | Blade + Livewire 3 + Alpine.js + Tailwind CSS |
+| Real-time | Livewire polling (default) + Laravel Reverb WebSocket (optional) |
+| Process supervision | Supervisor (queue workers) + nginx + PHP-FPM |
+| Protocol bridge | Node.js sidecar (see Requirement 35 — mandatory, explained below) |
+
+Redis **optional** hai — MySQL driver default hai taaki deployment sirf PHP + MySQL pe chal jaye. Redis configure hone pe queue/cache/lock automatically usko use karenge.
+
+---
+
+## ⚠️ Critical Architectural Constraint (please read)
+
+**PHP alone WhatsApp se connect nahi kar sakta.** Yeh limitation avoidable nahi hai, aur ye poore design ko shape karti hai:
+
+1. WhatsApp Multi-Device protocol ek **persistent encrypted WebSocket** (Noise protocol handshake + Signal E2E encryption) pe chalta hai. PHP-FPM ka request-response execution model long-lived socket connection hold nahi kar sakta, aur koi maintained pure-PHP implementation of this protocol exist nahi karta. [Baileys](https://github.com/whiskeysockets/Baileys), jo de-facto library hai, TypeScript/Node hai aur WebSocket ke through directly connect karti hai.
+
+2. **Meta ki official Cloud API se ye feature list possible nahi hai.** Cloud API free-form replies ko 24-hour window mein restrict karti hai aur [group support nahi deti](https://laravel-news.com/laravel-whatsapp-two-backends-behind-one-facade). 2026 mein add hui official Groups API sirf **8 participants** tak ke invite-only groups support karti hai aur OBA status + 100k messaging tier maangti hai — matlab aapke group create, 1024-member tag-all, member number extraction, aur channel management features Cloud API pe **impossible** hain. *(Content was rephrased for compliance with licensing restrictions.)*
+
+**Isliye design ye hai:** **100% application logic PHP/Laravel + MySQL mein hai** — dashboard, auth, campaigns, queue, scheduler, anti-ban, groups, channels, welcome, extraction, export, tagging, error reporting, saara data. Ek **thin Node.js "WA Bridge" sidecar** sirf protocol socket hold karta hai — usme koi business logic, koi database access, koi decision-making nahi hai. Bridge ek dumb transport hai jo localhost HTTP commands leta hai aur events webhook se PHP ko wapas bhejta hai (Requirement 35).
+
+Agar aap **absolutely zero non-PHP code** chahte ho, to teen features families drop karni padengi (groups, channels, extraction/tagging) aur messaging Cloud API ke 24-hour window + approved templates tak limit ho jayegi. Yeh trade-off design.md mein documented hai.
+
+---
 
 ### Scope Boundaries
 
 - **In scope:** owned numbers, owned groups/channels, opt-in aur consented contact lists
-- **Out of scope:** unsolicited cold outreach, ToS-bypass techniques, scraping of non-owned groups
-- Platform rate limits ko **enforce** karta hai, unko circumvent nahi karta
+- **Out of scope:** unsolicited cold outreach, ToS-bypass techniques, non-owned group scraping
+- Platform rate limits ko **enforce** kiya jata hai, circumvent nahi
 
 ### Glossary
 
 | Term | Meaning |
 |------|---------|
 | Session | Ek connected WhatsApp number ka authenticated socket + auth state |
+| Bridge | Node.js sidecar jo WhatsApp socket hold karta hai (Req 35) |
 | JID | WhatsApp identifier (`91XXXXXXXXXX@s.whatsapp.net`, `…@g.us`, `…@newsletter`) |
-| Campaign | Ek recipient list + template + send mode + optional schedule ka bundle |
+| Campaign | Recipient list + template + send mode + optional schedule ka bundle |
 | Single mode | Sequential send — ek message ka ack aane ke baad next |
-| Dual mode | Parallel send — N concurrent workers se simultaneous fan-out |
+| Dual mode | Parallel send — N concurrent queue workers se simultaneous fan-out |
 | Warm-up | Naye number ka daily quota gradually badhane ki process |
-| DLQ | Dead-letter queue — max retries ke baad fail hue jobs ka store |
+| Failed jobs table | MySQL `failed_jobs` — max retries ke baad fail hue jobs ka store (DLQ) |
 
 ---
 
@@ -30,18 +68,18 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 ### Requirement 1: Multi-Session Management
 
-**User Story:** As an operator, I want multiple WhatsApp numbers ko ek hi bot instance se connect karna, so that main different numbers ko different purposes (sales, support, alerts) ke liye parallel use kar sakoon.
+**User Story:** As an operator, I want multiple WhatsApp numbers ko ek hi panel se connect karna, so that main different numbers ko different purposes (sales, support, alerts) ke liye parallel use kar sakoon.
 
 #### Acceptance Criteria
 
-1. WHEN operator ek naya session create karta hai with a unique name THEN the system SHALL uska dedicated auth directory banaye aur session record DB mein persist kare with status `INITIALIZING`
-2. WHEN session start hota hai AND koi valid credential nahi hai THEN the system SHALL QR code (terminal ASCII + base64 PNG) aur pairing-code option dono expose kare
+1. WHEN operator ek naya session create karta hai with a unique name THEN the system SHALL `sessions` table mein record banaye with status `INITIALIZING` aur bridge ko session provision command bheje
+2. WHEN session start hota hai AND koi valid credential nahi hai THEN the system SHALL QR code (base64 PNG dashboard mein) aur pairing-code option dono expose kare
 3. WHEN QR code 60 second tak scan nahi hota THEN the system SHALL naya QR generate kare aur maximum 5 attempts ke baad session ko `QR_TIMEOUT` status pe rok de
-4. WHEN operator pairing-code login choose karta hai with a phone number THEN the system SHALL 8-character pairing code return kare
-5. WHEN session successfully authenticate hota hai THEN the system SHALL credentials disk pe persist kare aur status `CONNECTED` set kare with phone number, push name aur device id
-6. WHEN bot process restart hota hai THEN the system SHALL saare previously `CONNECTED` sessions ko automatically restore kare without human intervention
-7. WHEN ek session runtime error se crash hota hai THEN the system SHALL baaki sessions ko unaffected chalne de
-8. WHEN operator session delete karta hai THEN the system SHALL socket logout kare, auth directory remove kare aur DB record soft-delete kare
+4. WHEN operator pairing-code login choose karta hai with a phone number THEN the system SHALL 8-character pairing code dashboard pe dikhaye
+5. WHEN session successfully authenticate hota hai THEN the system SHALL phone number, push name aur device id MySQL mein store kare aur status `CONNECTED` set kare
+6. WHEN bridge ya server restart hota hai THEN the system SHALL saare previously `CONNECTED` sessions ko automatically restore kare without human intervention
+7. WHEN ek session fail hota hai THEN the system SHALL baaki sessions ko unaffected chalne de
+8. WHEN operator session delete karta hai THEN the system SHALL bridge pe logout trigger kare, auth state remove kare aur DB record soft-delete kare
 9. IF configured maximum concurrent session limit reach ho gaya hai THEN the system SHALL naya session start karne se refuse kare with a clear error
 10. WHEN koi bhi log line likhi jaati hai THEN the system SHALL usme session identifier include kare
 
@@ -49,7 +87,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 ### Requirement 2: Auto Reconnect and Connection Health
 
-**User Story:** As an operator, I want bot network drop ya WhatsApp-side restart pe khud reconnect ho jaye, so that mujhe manually restart na karna pade.
+**User Story:** As an operator, I want connection network drop ya WhatsApp-side restart pe khud reconnect ho jaye, so that mujhe manually restart na karna pade.
 
 #### Acceptance Criteria
 
@@ -57,10 +95,11 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 2. WHEN disconnect reason `loggedOut` hai THEN the system SHALL reconnect attempt NOT kare aur session ko `LOGGED_OUT` mark karke operator ko notify kare
 3. WHEN disconnect reason `restartRequired` ya `connectionLost` ya `timedOut` hai THEN the system SHALL backoff schedule ke hisaab se retry kare
 4. WHEN disconnect reason `connectionReplaced` hai THEN the system SHALL retry rok de aur `REPLACED` status set kare
-5. WHEN reconnect successful hota hai THEN the system SHALL backoff counter reset kare aur reconnect count metric increment kare
-6. WHEN socket configured heartbeat interval tak koi event nahi bhejta THEN the system SHALL socket ko stale treat karke forced reconnect kare
-7. WHEN `/health` endpoint call hota hai THEN the system SHALL per-session status, uptime, last-seen timestamp aur reconnect count return kare
-8. WHILE session disconnected hai THE system SHALL uske outgoing messages ko queue mein hold kare instead of failing them immediately
+5. WHEN reconnect successful hota hai THEN the system SHALL backoff counter reset kare aur reconnect count `sessions` table mein increment kare
+6. WHEN bridge configured heartbeat interval tak PHP ko koi event ya ping nahi bhejta THEN the system SHALL session ko stale treat karke forced reconnect trigger kare
+7. WHEN `/api/v1/health` endpoint call hota hai THEN the system SHALL per-session status, uptime, last-seen timestamp, reconnect count aur bridge reachability return kare
+8. WHILE session disconnected hai THE system SHALL uske queued messages ko `available_at` future set karke hold kare instead of failing them immediately
+9. IF bridge process reachable nahi hai THEN the system SHALL saare send jobs release karke retry kare aur CRITICAL alert bheje
 
 ---
 
@@ -71,9 +110,9 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 #### Acceptance Criteria
 
 1. WHEN operator single mode send trigger karta hai THEN the system SHALL ek time pe ek hi message bheje aur next message se pehle previous ka server ack wait kare
-2. WHEN recipient number provide hota hai in any common format THEN the system SHALL usko normalize karke valid JID banaye
+2. WHEN recipient number kisi bhi common format mein diya jata hai THEN the system SHALL usko normalize karke valid JID banaye
 3. WHEN recipient number WhatsApp pe registered nahi hai THEN the system SHALL send skip kare aur error code `NOT_ON_WHATSAPP` record kare
-4. WHEN message successfully bhej diya jata hai THEN the system SHALL DB mein record kare with local id, WhatsApp message id, session id, recipient, content hash aur timestamp
+4. WHEN message successfully bhej diya jata hai THEN the system SHALL `messages` table mein record kare with id, WhatsApp message id, session id, recipient, content hash aur timestamp
 5. IF ack configured timeout ke andar nahi aata THEN the system SHALL message ko `PENDING_TIMEOUT` mark kare aur sequence continue kare
 6. WHEN send fail hota hai THEN the system SHALL error ko normalized code ke saath capture kare aur retry policy ke hawale kar de
 
@@ -85,14 +124,14 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN operator dual mode select karta hai THEN the system SHALL configured number of concurrent workers se messages parallel bheje
+1. WHEN operator dual mode select karta hai THEN the system SHALL configured number of parallel Supervisor queue workers se messages simultaneously bheje
 2. WHEN campaign create hota hai THEN the system SHALL recipient list accept kare from manual entry, CSV upload, saved contact list, ya group member extraction
-3. WHEN campaign start hota hai THEN the system SHALL har recipient ke liye ek queue job enqueue kare with idempotency key
-4. WHEN duplicate recipient same campaign mein exist karta hai THEN the system SHALL usko de-duplicate kare before enqueueing
+3. WHEN campaign start hota hai THEN the system SHALL har recipient ke liye ek queue job dispatch kare with unique idempotency key
+4. WHEN duplicate recipient same campaign mein exist karta hai THEN the system SHALL usko de-duplicate kare before dispatching
 5. WHILE campaign chal raha hai THE system SHALL live progress expose kare — total, sent, delivered, read, failed, remaining
 6. WHEN operator campaign pause karta hai THEN the system SHALL in-flight message complete hone de but naye job dispatch rok de
 7. WHEN paused campaign resume hota hai THEN the system SHALL exactly wahi se continue kare aur already-sent recipients ko dobara message NOT kare
-8. WHEN operator campaign cancel karta hai THEN the system SHALL pending jobs remove kare aur campaign ko `CANCELLED` mark kare with partial stats preserved
+8. WHEN operator campaign cancel karta hai THEN the system SHALL pending jobs delete kare aur campaign ko `CANCELLED` mark kare with partial stats preserved
 9. WHEN campaign ke saare jobs process ho jaate hain THEN the system SHALL campaign ko `COMPLETED` mark kare aur final summary report generate kare
 
 ---
@@ -103,15 +142,16 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN message enqueue hota hai THEN the system SHALL uska status `PENDING` set kare
+1. WHEN message queue mein dispatch hota hai THEN the system SHALL uska status `PENDING` set kare
 2. WHEN WhatsApp server message accept karta hai THEN the system SHALL status `SENT` (✓) update kare
 3. WHEN recipient ke device pe message deliver hota hai THEN the system SHALL status `DELIVERED` (✓✓) update kare
 4. WHEN recipient message read karta hai THEN the system SHALL status `READ` (🔵✓✓) update kare
 5. WHEN voice note play hoti hai THEN the system SHALL status `PLAYED` update kare
 6. WHEN send permanently fail hota hai THEN the system SHALL status `FAILED` (✗) set kare with reason
-7. WHEN koi bhi status transition hota hai THEN the system SHALL uska timestamp status-history timeline mein append kare
-8. WHEN status change hota hai for a campaign message THEN the system SHALL campaign aggregate counters update kare aur WebSocket pe live event push kare
+7. WHEN koi bhi status transition hota hai THEN the system SHALL uska timestamp `message_status_events` table mein append kare
+8. WHEN status change hota hai for a campaign message THEN the system SHALL campaign aggregate counters update kare aur dashboard ko live event bheje
 9. IF recipient ke privacy settings read receipts disable karte hain THEN the system SHALL `DELIVERED` ko terminal success state treat kare
+10. WHEN out-of-order ack aata hai THEN the system SHALL status ko downgrade NOT kare
 
 ---
 
@@ -121,15 +161,15 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN message send request aata hai THEN the system SHALL usko persistent queue mein enqueue kare instead of directly sending
-2. WHILE queue process ho raha hai THE system SHALL per-session concurrency limit enforce kare
-3. WHEN configured per-minute, per-hour ya per-day rate limit reach hota hai THEN the system SHALL dispatch rok de until window reset ho jaye
+1. WHEN message send request aata hai THEN the system SHALL usko Laravel queue mein dispatch kare instead of synchronously sending
+2. WHILE queue process ho raha hai THE system SHALL per-session concurrency limit enforce kare using named queues aur atomic locks
+3. WHEN configured per-minute, per-hour ya per-day rate limit reach hota hai THEN the system SHALL job ko release kare with delay until window reset ho jaye
 4. WHEN different priority ke jobs queue mein hain THEN the system SHALL `transactional > welcome > campaign` order mein process kare
-5. WHEN operator queue pause karta hai THEN the system SHALL naye jobs dispatch rokey but enqueue accept karta rahe
-6. WHEN bot restart hota hai THEN the system SHALL pending queue jobs ko lose NOT kare
-7. WHEN same idempotency key ka job dobara enqueue hota hai THEN the system SHALL duplicate send NOT kare
-8. WHEN queue depth configured threshold cross karta hai THEN the system SHALL backpressure signal kare aur new enqueues throttle kare
-9. WHEN operator queue stats maangta hai THEN the system SHALL waiting, active, completed, failed aur delayed job counts return kare
+5. WHEN operator queue pause karta hai THEN the system SHALL naye jobs dispatch rokey but new jobs enqueue accept karta rahe
+6. WHEN server ya worker restart hota hai THEN the system SHALL pending jobs lose NOT kare (MySQL-backed queue)
+7. WHEN same idempotency key ka job dobara dispatch hota hai THEN the system SHALL duplicate send NOT kare
+8. WHEN queue depth configured threshold cross karta hai THEN the system SHALL backpressure signal kare aur new dispatches throttle kare
+9. WHEN operator queue stats maangta hai THEN the system SHALL pending, reserved, delayed aur failed job counts return kare
 
 ---
 
@@ -140,14 +180,15 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 #### Acceptance Criteria
 
 1. WHEN consecutive messages bheje jaate hain THEN the system SHALL configured min–max range mein randomized delay insert kare
-2. WHEN delay compute hota hai THEN the system SHALL uniform-random ke bajaye jitter distribution use kare taaki pattern detectable na ho
+2. WHEN delay compute hota hai THEN the system SHALL uniform-random ke bajaye truncated-gaussian distribution use kare taaki pattern detectable na ho
 3. WHEN message send hone wala hai THEN the system SHALL pehle `composing` presence bheje, message length ke proportional typing duration wait kare, phir `paused` bheje
 4. WHEN session ki age configured warm-up period ke andar hai THEN the system SHALL daily send quota ko warm-up ramp schedule ke hisaab se limit kare
-5. WHEN template mein spintax syntax (`{option1|option2}`) hai THEN the system SHALL har recipient ke liye randomly ek variant choose kare
+5. WHEN template mein spintax syntax (`{option1|option2}`) hai THEN the system SHALL har recipient ke liye deterministically random variant choose kare
 6. WHEN configured batch size ke messages bhej diye jaate hain THEN the system SHALL configured cool-down break le before next batch
 7. WHEN current time configured quiet-hours window mein hai THEN the system SHALL campaign sends defer kare until window khatam ho
 8. WHEN rolling window mein delivery failure rate configured threshold cross karta hai THEN the system SHALL send rate auto-throttle kare aur operator ko alert kare
 9. WHEN naye unknown recipients ko message ja raha hai THEN the system SHALL per-day new-contact limit enforce kare
+10. WHEN warm-up ya quota cap active hai THEN the system SHALL usko runtime configuration se override hone NOT de
 
 ---
 
@@ -158,14 +199,15 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 #### Acceptance Criteria
 
 1. WHEN operator media message compose karta hai THEN the system SHALL image, video, audio, voice note, document aur sticker types support kare
-2. WHEN media local upload se aata hai THEN the system SHALL uska MIME type content-sniffing se verify kare, extension pe bharosa NOT kare
-3. WHEN media size configured limit se bada hai THEN the system SHALL send reject kare with a clear validation error
+2. WHEN media upload hota hai THEN the system SHALL uska MIME type content-sniffing (`finfo`) se verify kare, extension pe bharosa NOT kare
+3. WHEN media size configured limit se bada hai THEN the system SHALL upload reject kare with a clear validation error
 4. WHEN media remote URL se aata hai THEN the system SHALL usko download kare with timeout aur size cap
 5. WHEN image configured dimension ya size threshold se badi hai THEN the system SHALL usko compress kare before sending
 6. WHEN video bheja jata hai THEN the system SHALL thumbnail generate karke attach kare
 7. WHEN same media multiple recipients ko ja raha hai THEN the system SHALL uploaded media reference reuse kare instead of re-uploading per recipient
 8. WHEN media message mein caption hai THEN the system SHALL caption pe bhi template variable interpolation apply kare
 9. IF media upload fail hota hai THEN the system SHALL error `MEDIA_UPLOAD_FAILED` record kare aur us recipient ka job retry queue mein daale
+10. WHEN media file store hoti hai THEN the system SHALL filename server-side generate kare aur user-supplied path NOT use kare
 
 ---
 
@@ -176,11 +218,11 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 #### Acceptance Criteria
 
 1. WHEN operator template create karta hai THEN the system SHALL name, category, body, optional media aur variable list ke saath usko persist kare
-2. WHEN template edit hota hai THEN the system SHALL naya version create kare aur purane version ka history preserve kare
+2. WHEN template edit hota hai THEN the system SHALL naya version row create kare aur purane version ka history preserve kare
 3. WHEN template render hota hai THEN the system SHALL `{{name}}`, `{{group}}`, `{{date}}` aur `{{custom.*}}` placeholders ko recipient data se replace kare
 4. IF koi variable ki value missing hai AND fallback defined hai THEN the system SHALL fallback value use kare
 5. IF koi variable ki value missing hai AND strict mode enabled hai THEN the system SHALL us recipient ka send block kare with `MISSING_VARIABLE` error
-6. WHEN operator template preview maangta hai THEN the system SHALL sample data ke saath rendered output return kare without sending
+6. WHEN operator template preview maangta hai THEN the system SHALL sample data ke saath rendered output dikhaye without sending
 7. WHEN operator test-send karta hai THEN the system SHALL message sirf connected session ke apne number pe bheje
 
 ---
@@ -194,11 +236,12 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 1. WHEN operator one-time schedule set karta hai with datetime aur timezone THEN the system SHALL message us exact local time pe dispatch kare
 2. WHEN operator recurring schedule set karta hai with a cron expression THEN the system SHALL har matching occurrence pe campaign trigger kare
 3. WHEN schedule create hota hai THEN the system SHALL next 5 planned run times preview mein dikhaye
-4. WHEN bot restart hota hai THEN the system SHALL saare active schedules DB se reload kare
-5. IF downtime ke dauran koi scheduled run miss ho gaya THEN the system SHALL configured recovery policy (`skip`, `run-once`, ya `catch-up`) apply kare
+4. WHEN server restart hota hai THEN the system SHALL schedules MySQL se read kare (state process memory mein NOT rakhe)
+5. IF downtime ke dauran koi scheduled run miss ho gaya THEN the system SHALL configured recovery policy (`SKIP`, `RUN_ONCE`, ya `CATCH_UP`) apply kare
 6. WHEN daylight-saving shift hoti hai THEN the system SHALL schedule ko operator ke intended local time pe hi rakhe
 7. WHEN operator schedule disable karta hai THEN the system SHALL future runs rok de but history preserve kare
-8. WHEN operator "run now" trigger karta hai THEN the system SHALL immediately execute kare without regular schedule ko disturb kiye
+8. WHEN operator "run now" trigger karta hai THEN the system SHALL immediately execute kare without `next_run_at` disturb kiye
+9. WHEN multiple app servers deploy hote hain THEN the scheduler SHALL atomic lock use kare taaki ek hi instance dispatch kare
 
 ---
 
@@ -209,7 +252,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 #### Acceptance Criteria
 
 1. WHEN operator group create karta hai with subject aur initial participants THEN the system SHALL group banaye aur uska JID plus metadata return kare
-2. WHEN group create hota hai THEN the system SHALL group record aur uske members local DB mein cache kare
+2. WHEN group create hota hai THEN the system SHALL group record aur uske members MySQL mein cache kare
 3. WHEN operator invite link maangta hai THEN the system SHALL current invite link return kare
 4. WHEN operator invite link revoke karta hai THEN the system SHALL naya link generate kare aur purana invalidate kare
 5. WHEN operator invite link se group join karta hai THEN the system SHALL join kare aur group metadata sync kare
@@ -232,7 +275,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 5. IF bot us group mein admin nahi hai THEN the system SHALL admin-only action attempt karne se pehle reject kare with `NOT_GROUP_ADMIN`
 6. WHEN bulk participant operation CSV se hoti hai THEN the system SHALL row-by-row result report generate kare with success aur failure reasons
 7. WHEN bulk add chalta hai THEN the system SHALL participants ko chunks mein process kare with delay between chunks
-8. WHEN member list sync hota hai THEN the system SHALL local cache ko WhatsApp ke actual participant list se reconcile kare
+8. WHEN member list sync hota hai THEN the system SHALL local cache ko actual participant list se reconcile kare
 
 ---
 
@@ -247,7 +290,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 3. WHEN operator disappearing messages set karta hai THEN the system SHALL chosen duration apply kare
 4. WHEN operator subject, description ya group icon update karta hai THEN the system SHALL change apply kare aur local cache refresh kare
 5. WHEN operator membership approval mode toggle karta hai THEN the system SHALL group ka approval requirement update kare
-6. WHEN koi bhi settings change hota hai THEN the system SHALL audit log entry banaye with actor, timestamp aur old/new value
+6. WHEN koi bhi settings change hota hai THEN the system SHALL `audit_logs` mein entry banaye with actor, timestamp aur old/new value
 
 ---
 
@@ -263,7 +306,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 4. WHEN operator bulk approve ya reject karta hai THEN the system SHALL saare selected requests process kare aur per-request result return kare
 5. WHEN auto-approve rule configured hai AND requester allowlist criteria (country code, regex pattern) match karta hai THEN the system SHALL usko automatically approve kare
 6. WHEN requester blocklist mein hai THEN the system SHALL request automatically reject kare
-7. WHEN koi request auto-processed hota hai THEN the system SHALL decision, matched rule aur timestamp ke saath audit log likhe
+7. WHEN koi request auto-processed hota hai THEN the system SHALL decision, matched rule aur timestamp audit log mein likhe
 8. IF koi rule match nahi karta THEN the system SHALL request ko manual review ke liye pending rakhe
 
 ---
@@ -293,8 +336,8 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 1. WHEN ek group ke liye multiple welcome templates configured hain THEN the system SHALL configured rotation strategy (sequential, random, ya weighted) se ek choose kare
 2. WHEN welcome template mein media attached hai THEN the system SHALL image, video ya GIF ko caption ke saath bheje
-3. WHEN dynamic welcome card enabled hai THEN the system SHALL member name, avatar aur member count ke saath image generate karke bheje
-4. IF dynamic image generation fail hoti hai THEN the system SHALL text-only welcome pe fallback kare
+3. WHEN dynamic welcome card enabled hai THEN the system SHALL PHP GD ya Intervention Image se member name, avatar aur member count ke saath image generate karke bheje
+4. IF dynamic image generation fail hoti hai THEN the system SHALL text-only welcome pe fallback kare aur error log kare
 5. WHEN A/B testing enabled hai THEN the system SHALL variants evenly distribute kare aur per-variant delivery stats track kare
 
 ---
@@ -311,7 +354,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 4. WHEN operator country-code filter apply karta hai THEN the system SHALL sirf matching numbers return kare
 5. WHEN operator admins-only filter apply karta hai THEN the system SHALL sirf group admins return kare
 6. WHEN operator exclude-existing filter apply karta hai THEN the system SHALL already-saved contacts ko result se hataye
-7. WHEN extraction bade group pe chalti hai THEN the system SHALL result stream kare without excessive memory use
+7. WHEN extraction bade group pe chalti hai THEN the system SHALL result ko chunked/generator fashion mein process kare without PHP memory limit hit kiye
 8. IF bot us group ka member nahi hai THEN the system SHALL extraction reject kare with `NOT_GROUP_MEMBER`
 
 ---
@@ -340,10 +383,11 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 1. WHEN operator export request karta hai THEN the system SHALL CSV, TXT, JSON, XLSX aur vCard formats support kare
 2. WHEN CSV export hota hai THEN the system SHALL UTF-8 BOM include kare taaki Excel mein characters correctly khulein
 3. WHEN operator columns select karta hai THEN the system SHALL sirf wahi columns chosen order mein export kare
-4. WHEN export dataset bada hai THEN the system SHALL file ko stream karke likhe without entire dataset memory mein load kiye
+4. WHEN export dataset bada hai THEN the system SHALL query ko chunk kare aur file ko stream karke likhe without entire dataset memory mein load kiye
 5. WHEN export complete hota hai THEN the system SHALL signed download URL return kare jo configured time ke baad expire ho
 6. WHEN error report export hota hai THEN the system SHALL error code, category, message, session, recipient, timestamp aur retry count include kare
 7. WHEN vCard export hota hai THEN the system SHALL valid vCard output produce kare jo standard contact apps mein import ho jaye
+8. WHEN export file path banti hai THEN the system SHALL filename server-side generate kare aur path traversal input reject kare
 
 ---
 
@@ -373,9 +417,9 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 2. WHEN operator channel metadata update karta hai THEN the system SHALL name, description ya picture change apply kare
 3. WHEN operator channel delete karta hai THEN the system SHALL channel remove kare aur local record ko `DELETED` mark kare
 4. WHEN operator follow, unfollow, mute ya unmute karta hai THEN the system SHALL corresponding action apply kare
-5. WHEN operator subscriber ya admin info maangta hai THEN the system SHALL jitna underlying API expose karta hai wahi return kare
-6. IF underlying library ka koi channel operation supported nahi hai THEN the system SHALL crash ke bajaye clear `UNSUPPORTED_OPERATION` error return kare
-7. WHEN bot start hota hai THEN the system SHALL available channel capabilities detect karke log kare
+5. WHEN operator subscriber ya admin info maangta hai THEN the system SHALL jitna bridge expose karta hai wahi return kare
+6. IF bridge kisi channel operation ko support NOT karta THEN the system SHALL crash ke bajaye clear `UNSUPPORTED_OPERATION` error return kare
+7. WHEN bridge connect hota hai THEN the system SHALL uski reported capability list store karke log kare
 
 ---
 
@@ -401,13 +445,13 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN system mein koi bhi error hota hai THEN the system SHALL usko normalized code, category, severity, session, related entity, message, stack aur context payload ke saath record kare
-2. WHEN error categorize hota hai THEN the system SHALL `AUTH`, `RATE_LIMIT`, `NOT_ON_WHATSAPP`, `MEDIA`, `NETWORK`, `PERMISSION`, `VALIDATION` ya `UNKNOWN` assign kare
+1. WHEN system mein koi bhi error hota hai THEN the system SHALL usko normalized code, category, severity, session, related entity, message, stack aur context payload ke saath `error_logs` table mein record kare
+2. WHEN error categorize hota hai THEN the system SHALL `AUTH`, `RATE_LIMIT`, `NOT_ON_WHATSAPP`, `MEDIA`, `NETWORK`, `BRIDGE`, `PERMISSION`, `VALIDATION` ya `UNKNOWN` assign kare
 3. WHEN error log mein phone number hai THEN the system SHALL usko partially redact kare
 4. WHEN operator error dashboard kholta hai THEN the system SHALL session, date range, category aur severity ke filters de
 5. WHEN operator error trend dekhta hai THEN the system SHALL time ke against error rate chart dikhaye
 6. WHEN repeated failures ek hi recipient pe hote hain THEN the system SHALL top failing recipients ki list surface kare
-7. WHEN error logs configured retention period se purane ho jaate hain THEN the system SHALL unko purge kare
+7. WHEN error logs configured retention period se purane ho jaate hain THEN the system SHALL unko scheduled job se purge kare
 
 ---
 
@@ -419,10 +463,10 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 1. WHEN send fail hota hai with a retryable error category THEN the system SHALL exponential backoff plus jitter ke saath retry kare
 2. WHEN error category permanently non-retryable hai (jaise `NOT_ON_WHATSAPP`) THEN the system SHALL retry NOT kare
-3. WHEN retry attempts configured maximum tak pahunch jaate hain THEN the system SHALL job ko dead-letter queue mein move kare
-4. WHEN operator DLQ dekhta hai THEN the system SHALL failed jobs unke last error aur attempt count ke saath dikhaye
-5. WHEN operator manual bulk retry trigger karta hai THEN the system SHALL selected DLQ jobs ko fresh attempt counter ke saath re-enqueue kare
-6. WHEN retry successful hota hai THEN the system SHALL original message record update kare instead of duplicate banaye
+3. WHEN retry attempts configured maximum tak pahunch jaate hain THEN the system SHALL job ko `failed_jobs` table mein move kare
+4. WHEN operator failed-jobs view dekhta hai THEN the system SHALL failed jobs unke last error aur attempt count ke saath dikhaye
+5. WHEN operator manual bulk retry trigger karta hai THEN the system SHALL selected failed jobs ko fresh attempt counter ke saath re-dispatch kare
+6. WHEN retry successful hota hai THEN the system SHALL original message row update kare instead of duplicate banaye
 7. WHEN rate-limit error aata hai THEN the system SHALL retry se pehle configured cool-down wait kare
 
 ---
@@ -433,7 +477,7 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN naya error record hota hai THEN the system SHALL usko connected dashboard clients pe WebSocket se live push kare
+1. WHEN naya error record hota hai THEN the system SHALL usko dashboard pe live surface kare (Livewire poll ya Reverb broadcast)
 2. WHEN error severity configured alert threshold ko meet karta hai THEN the system SHALL configured channels (WhatsApp admin DM, Telegram, email, generic webhook) pe alert bheje
 3. WHEN session disconnect hota hai THEN the system SHALL configured seconds ke andar operator ko alert bheje
 4. WHEN error rate spike detect hota hai THEN the system SHALL threshold-breach alert bheje
@@ -449,37 +493,59 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 #### Acceptance Criteria
 
-1. WHEN API request aati hai THEN the system SHALL usko versioned path (`/api/v1/...`) pe serve kare
-2. WHEN request body ya query params aate hain THEN the system SHALL unko schema se validate kare aur invalid input pe structured 400 error de
-3. WHEN user valid credentials se login karta hai THEN the system SHALL short-lived access token aur refresh token issue kare
+1. WHEN API request aati hai THEN the system SHALL usko `https://bot.getxtrra.in/api/v1/...` versioned path pe serve kare
+2. WHEN request body ya query params aate hain THEN the system SHALL Laravel Form Request validation se validate kare aur invalid input pe structured 422 error de
+3. WHEN user valid credentials se login karta hai THEN the system SHALL Sanctum token issue kare
 4. WHEN request bina valid token ya API key aati hai THEN the system SHALL 401 return kare
 5. WHEN user ke role ke paas required permission nahi hai THEN the system SHALL 403 return kare
 6. WHEN roles assign hote hain THEN the system SHALL `owner`, `admin`, `operator` aur `viewer` levels support kare
 7. WHEN API key configured rate limit exceed karti hai THEN the system SHALL 429 return kare with retry-after
 8. WHEN koi state-changing operation hoti hai THEN the system SHALL audit log likhe with actor, action, target aur timestamp
 9. WHEN API documentation request hoti hai THEN the system SHALL OpenAPI spec aur browsable UI serve kare
+10. WHEN application deploy hota hai THEN the system SHALL saara traffic HTTPS pe force kare aur HTTP ko redirect kare
 
 ---
 
-### Requirement 27: Web Dashboard
+### Requirement 27: Default Admin Account and Access Security
+
+**User Story:** As the system owner, I want ek known default admin login `admin` / `admin` se initial access, so that main deploy ke turant baad panel use kar sakoon.
+
+#### Acceptance Criteria
+
+1. WHEN database seed chalti hai THEN the system SHALL ek `owner` role user create kare with username `admin` aur password `admin`
+2. WHEN `admin` user pehli baar login karta hai THEN the system SHALL usko forced password-change screen pe le jaye
+3. WHILE default password abhi tak change nahi hua hai THE system SHALL dashboard pe persistent security warning banner dikhaye
+4. WHILE default password abhi tak change nahi hua hai THE system SHALL destructive aur bulk-send operations block kare
+5. WHEN password store hota hai THEN the system SHALL bcrypt (Laravel Hash) use kare, plaintext ya reversible encoding NOT
+6. WHEN login attempts fail hote hain THEN the system SHALL per-IP aur per-username throttling apply kare aur configured attempts ke baad temporarily lock kare
+7. WHEN operator IP allowlist configure karta hai THEN the system SHALL admin panel access sirf allowlisted IPs tak restrict kare
+8. WHEN session idle configured timeout tak rehti hai THEN the system SHALL user ko automatically logout kare
+9. WHEN koi login (successful ya failed) hota hai THEN the system SHALL usko IP aur user agent ke saath audit log kare
+
+> **Note:** `admin` / `admin` ek publicly reachable domain (`bot.getxtrra.in`) pe guessable credential pair hai. Requirement 27.2–27.4 isliye exist karte hain — default password ke saath system usable hai but bulk-send jaisi risky operations tab tak locked rehti hain jab tak password change na ho.
+
+---
+
+### Requirement 28: Web Dashboard
 
 **User Story:** As an operator, I want browser-based control panel, so that mujhe terminal use na karna pade.
 
 #### Acceptance Criteria
 
-1. WHEN operator dashboard kholta hai THEN the system SHALL login screen dikhaye aur successful auth ke baad overview pe le jaye
+1. WHEN operator `https://bot.getxtrra.in` kholta hai THEN the system SHALL login screen dikhaye aur successful auth ke baad overview pe le jaye
 2. WHEN operator sessions page kholta hai THEN the system SHALL saare sessions unke status ke saath aur naya session QR scan karne ka option dikhaye
 3. WHEN operator campaign builder use karta hai THEN the system SHALL recipient selection, template choice, send mode, delay settings aur schedule step-by-step guide kare
-4. WHILE campaign chal raha hai THE dashboard SHALL live progress aur delivery tick counts update kare without page refresh
+4. WHILE campaign chal raha hai THE dashboard SHALL live progress aur delivery tick counts update kare without manual page refresh
 5. WHEN naya error aata hai THEN the dashboard SHALL live notification dikhaye
 6. WHEN operator analytics dekhta hai THEN the dashboard SHALL delivery funnel, hourly send volume aur error trend charts dikhaye
 7. WHEN dashboard mobile screen size pe khulta hai THEN the layout SHALL responsively adapt kare
 8. WHEN operator language switch karta hai THEN the dashboard SHALL English aur Hindi ke beech UI text badle
 9. WHEN operator bulk messaging feature access karta hai THEN the dashboard SHALL compliance disclaimer prominently dikhaye
+10. WHEN QR code display hota hai THEN the dashboard SHALL usko auto-refresh kare expiry pe without page reload
 
 ---
 
-### Requirement 28: Contact Management and vCard
+### Requirement 29: Contact Management and vCard
 
 **User Story:** As an operator, I want contacts ko organized rakhna aur import/export karna, so that audience targeting easy ho.
 
@@ -491,12 +557,13 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 4. WHEN operator vCard import karta hai THEN the system SHALL vCard 3.0 aur 4.0 dono parse kare
 5. WHEN operator contacts export karta hai THEN the system SHALL vCard aur tabular formats offer kare
 6. WHEN operator WhatsApp phonebook sync karta hai THEN the system SHALL session ke contacts pull kare aur local records se reconcile kare
-7. WHEN operator rule-based segment banata hai THEN the system SHALL membership dynamically evaluate kare jab contacts change hon
+7. WHEN operator rule-based segment banata hai THEN the system SHALL membership dynamically query time pe evaluate kare
 8. WHEN operator contact ko blocklist mein daalta hai THEN the system SHALL usko har future campaign se exclude kare
+9. WHEN bada import chalta hai THEN the system SHALL usko queued job mein process kare, HTTP request mein NOT
 
 ---
 
-### Requirement 29: Opt-out and Compliance
+### Requirement 30: Opt-out and Compliance
 
 **User Story:** As a responsible operator, I want opt-out requests automatically honor hon, so that main compliant rahoon.
 
@@ -508,43 +575,45 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 4. WHEN opt-out register hota hai THEN the system SHALL recipient ko confirmation acknowledgement bheje
 5. WHEN operator data-deletion request process karta hai THEN the system SHALL us contact ka personal data purge kare but aggregate counters preserve kare
 6. WHEN retention policy chalti hai THEN the system SHALL configured age se purane message bodies aur logs delete kare
+7. WHEN opt-out filter apply hota hai THEN the system SHALL usko runtime configuration se bypass hone NOT de
 
 ---
 
-### Requirement 30: Process Management and Deployment
+### Requirement 31: Deployment and Process Management
 
-**User Story:** As an operator, I want bot background mein reliably chale aur easily deploy ho, so that production mein stable rahe.
+**User Story:** As an operator, I want application reliably background mein chale aur easily deploy ho, so that production mein stable rahe.
 
 #### Acceptance Criteria
 
-1. WHEN bot process manager ke through start hota hai THEN the system SHALL background mein chale aur system reboot ke baad auto-start ho
-2. WHEN process crash hota hai THEN the process manager SHALL usko automatically restart kare
-3. WHEN process memory configured threshold cross karti hai THEN the process manager SHALL graceful restart kare
-4. WHEN naya version deploy hota hai THEN the system SHALL zero-downtime reload support kare
-5. WHEN logs likhe jaate hain THEN the system SHALL unko rotate kare aur configured period ke baad purge kare
-6. WHEN container deployment use hota hai THEN the system SHALL app, Redis, Postgres aur reverse proxy ko ek compose stack se up kare
-7. WHEN code push hota hai THEN CI pipeline SHALL lint, test aur build steps chalaye
-8. WHEN backup script chalti hai THEN the system SHALL session auth state aur database ka restorable backup banaye
-9. WHEN secrets configure hote hain THEN the system SHALL unko environment se read kare aur kabhi commit ya log NOT kare
+1. WHEN queue workers start hote hain THEN Supervisor SHALL unko manage kare, crash pe auto-restart kare aur boot pe start kare
+2. WHEN worker memory configured threshold cross karti hai THEN the system SHALL worker ko gracefully restart kare
+3. WHEN naya version deploy hota hai THEN the system SHALL maintenance mode, migration, cache rebuild aur `queue:restart` sequence follow kare
+4. WHEN Laravel Scheduler configure hota hai THEN system cron SHALL har minute `schedule:run` invoke kare
+5. WHEN logs likhe jaate hain THEN the system SHALL unko daily rotate kare aur configured retention ke baad purge kare
+6. WHEN web server configure hota hai THEN nginx SHALL PHP-FPM ke saath `bot.getxtrra.in` serve kare with TLS certificate aur HTTP→HTTPS redirect
+7. WHEN code push hota hai THEN CI pipeline SHALL Pint (lint), PHPStan (static analysis) aur Pest (tests) chalaye
+8. WHEN backup script chalti hai THEN the system SHALL MySQL dump aur session auth state ka restorable backup banaye
+9. WHEN secrets configure hote hain THEN the system SHALL unko `.env` se read kare aur kabhi commit ya log NOT kare
+10. WHEN bridge service deploy hota hai THEN Supervisor SHALL usko bhi manage kare aur uska port sirf localhost pe bind ho
 
 ---
 
-### Requirement 31: Multi-Device Orchestration
+### Requirement 32: Multi-Device Orchestration
 
 **User Story:** As an operator, I want multiple numbers ka pool load-balanced tarike se use karna, so that volume distribute ho aur ek number ban hone pe kaam na ruke.
 
 #### Acceptance Criteria
 
-1. WHEN campaign multiple sessions ke pool pe chalta hai THEN the system SHALL configured strategy (round-robin, least-used, weighted, ya health-aware) se number select kare
+1. WHEN campaign multiple sessions ke pool pe chalta hai THEN the system SHALL configured strategy (round-robin, least-used, weighted, ya health-aware) se session select kare
 2. WHEN sticky routing enabled hai THEN the system SHALL ek hi recipient ko hamesha same session se message bheje
 3. WHEN koi session unhealthy ya logged-out ho jata hai THEN the system SHALL uske pending jobs healthy sessions pe failover kare
 4. WHEN kisi session ka daily quota exhaust ho jata hai THEN the system SHALL usko selection se exclude kare until quota reset ho
 5. WHEN session warm-up stage mein hai THEN the system SHALL usko reduced share of traffic assign kare
-6. WHEN multiple worker nodes deploy hote hain THEN the system SHALL shared queue se coordinate kare without duplicate processing
+6. WHEN multiple app servers deploy hote hain THEN the system SHALL shared MySQL queue se coordinate kare without duplicate processing
 
 ---
 
-### Requirement 32: Observability and Metrics
+### Requirement 33: Observability and Metrics
 
 **User Story:** As an operator, I want system metrics aur structured logs, so that main health monitor kar sakoon.
 
@@ -552,38 +621,58 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 
 1. WHEN metrics endpoint scrape hota hai THEN the system SHALL messages-sent, delivery-rate, queue-depth, error-rate aur session-up metrics expose kare
 2. WHEN koi log line emit hoti hai THEN the system SHALL structured JSON use kare with level, timestamp, session aur correlation id
-3. WHEN ek request ya campaign multiple components se guzarta hai THEN the system SHALL correlation id propagate kare
+3. WHEN ek request ya campaign multiple components se guzarta hai THEN the system SHALL correlation id propagate kare including bridge calls
 4. WHEN sensitive data log ho sakta hai THEN the system SHALL usko mask kare before writing
-5. WHEN operator system status maangta hai THEN the system SHALL uptime, active sessions, queue health aur DB connectivity return kare
+5. WHEN operator system status maangta hai THEN the system SHALL uptime, active sessions, queue health, bridge reachability aur MySQL connectivity return kare
 
 ---
 
-### Requirement 33: Configuration Management
+### Requirement 34: Configuration Management
 
 **User Story:** As an operator, I want saari tuning knobs config se control karna, so that behaviour change karne ke liye code edit na karna pade.
 
 #### Acceptance Criteria
 
-1. WHEN application start hoti hai THEN the system SHALL configuration environment se load kare aur schema se validate kare
-2. IF required configuration missing ya invalid hai THEN the system SHALL startup pe fail kare with a descriptive message
-3. WHEN operator runtime settings (delays, rate limits, quiet hours) badalta hai THEN the system SHALL unhe process restart ke bina apply kare
+1. WHEN application boot hoti hai THEN the system SHALL configuration `.env` + `config/*.php` se load kare aur required values validate kare
+2. IF required configuration missing ya invalid hai THEN the system SHALL clear descriptive error ke saath fail kare
+3. WHEN operator runtime settings (delays, rate limits, quiet hours) dashboard se badalta hai THEN the system SHALL unhe restart ke bina apply kare
 4. WHEN kisi setting ki value nahi di gayi THEN the system SHALL documented safe default use kare
-5. WHEN configuration expose hoti hai via API THEN the system SHALL secret values redact kare
+5. WHEN configuration API ya UI pe expose hoti hai THEN the system SHALL secret values redact kare
 
 ---
 
-### Requirement 34: Quality and Reliability Baseline
+### Requirement 35: WhatsApp Bridge Service
+
+**User Story:** As a maintainer, I want protocol layer ko ek thin isolated service mein rakhna, so that PHP application poore business logic ka owner rahe aur bridge replaceable rahe.
+
+#### Acceptance Criteria
+
+1. WHEN bridge implement hota hai THEN it SHALL sirf protocol concerns handle kare — socket lifecycle, auth state, message send, event emit — aur koi business logic, koi database access, koi scheduling NOT
+2. WHEN bridge HTTP server start hota hai THEN it SHALL sirf `127.0.0.1` pe bind ho aur external network se reachable NOT ho
+3. WHEN PHP bridge ko call karta hai THEN it SHALL shared secret token authentication use kare
+4. WHEN bridge pe WhatsApp event aata hai THEN it SHALL usko PHP webhook endpoint pe POST kare with HMAC signature
+5. WHEN PHP webhook receive karta hai THEN it SHALL HMAC signature verify kare aur invalid signature reject kare
+6. WHEN bridge webhook delivery fail hoti hai THEN it SHALL bounded retry with backoff kare aur undelivered events local buffer mein rakhe
+7. WHEN bridge restart hota hai THEN it SHALL persisted auth state se saare active sessions reconnect kare
+8. WHEN bridge unreachable hota hai THEN PHP SHALL affected jobs release karke retry kare aur `BRIDGE` category error record kare
+9. WHEN bridge start hota hai THEN it SHALL apni supported capability list PHP ko report kare
+10. WHEN bridge auth state store karta hai THEN it SHALL usko web-root ke bahar restricted filesystem permissions ke saath rakhe
+
+---
+
+### Requirement 36: Quality and Reliability Baseline
 
 **User Story:** As a maintainer, I want tested aur documented codebase, so that changes safely ship ho sakein.
 
 #### Acceptance Criteria
 
-1. WHEN core services implement hote hain THEN the system SHALL unke unit tests include kare
-2. WHEN WhatsApp interactions test hoti hain THEN the test suite SHALL mocked socket use kare, real network NOT
-3. WHEN test suite chalti hai THEN the system SHALL core modules pe configured minimum coverage threshold meet kare
+1. WHEN core services implement hote hain THEN the system SHALL Pest unit tests include kare
+2. WHEN WhatsApp interactions test hoti hain THEN the test suite SHALL fake bridge client use kare, real network NOT
+3. WHEN test suite chalti hai THEN the system SHALL core namespaces pe configured minimum coverage threshold meet kare
 4. WHEN load test chalta hai with large queued volume THEN the system SHALL memory leak ke bina complete kare
 5. WHEN file path ya media input handle hota hai THEN the system SHALL path traversal aur injection ke against sanitize kare
-6. WHEN release publish hoti hai THEN the repository SHALL setup guide, API reference, troubleshooting aur changelog include kare
+6. WHEN database access hota hai THEN the system SHALL Eloquent ya parameterized queries use kare, string-concatenated SQL NOT
+7. WHEN release publish hoti hai THEN the repository SHALL setup guide, API reference, troubleshooting aur changelog include kare
 
 ---
 
@@ -617,11 +706,26 @@ Yeh document 37 features ko 34 formal requirements mein translate karta hai. Har
 | 24 | Failed Message Retry | 18 |
 | 25 | Real-time Notifications | 19 |
 | 26 | REST API & Auth | 33 |
-| 27 | Web Dashboard | 33 |
-| 28 | Contact Management (vCard) | 37 |
-| 29 | Opt-out & Compliance | — (new, compliance) |
-| 30 | Process Mgmt & Deployment | 32 |
-| 31 | Multi-Device Orchestration | 35 |
-| 32 | Observability | — (new, ops) |
-| 33 | Configuration Management | — (new, ops) |
-| 34 | Quality Baseline | — (new, quality) |
+| 27 | Default Admin & Access Security | — (new, per owner request) |
+| 28 | Web Dashboard | 33 |
+| 29 | Contact Management (vCard) | 37 |
+| 30 | Opt-out & Compliance | — (new, compliance) |
+| 31 | Deployment & Process Mgmt | 32 (Supervisor replaces PM2) |
+| 32 | Multi-Device Orchestration | 35 |
+| 33 | Observability | — (new, ops) |
+| 34 | Configuration Management | — (new, ops) |
+| 35 | WhatsApp Bridge Service | — (new, forced by PHP constraint) |
+| 36 | Quality Baseline | — (new, quality) |
+
+**Feature #32 note:** original list mein "PM2 Process Management" tha. PHP stack mein PM2 ka role Supervisor + Laravel `queue:work` leta hai; PM2 sirf bridge sidecar ke liye optional alternative hai. Requirement 31 isko cover karta hai.
+
+---
+
+## Sources
+
+- [Baileys — WhatsApp Web API library (WebSocket-based, TypeScript)](https://github.com/whiskeysockets/Baileys)
+- [Laravel WhatsApp: Two Backends Behind One Facade — Cloud API ke 24-hour window aur group support ki kami](https://laravel-news.com/laravel-whatsapp-two-backends-behind-one-facade)
+- [WhatsApp Groups API: 2026 Business Guide — official Groups API 8-participant limit](https://www.imbee.io/resource/whatsapp-groups-api-business-guide-2026)
+- [Meta WhatsApp Cloud API — Get Started](https://developers.facebook.com/docs/whatsapp/cloud-api/get-started)
+
+*Content was rephrased for compliance with licensing restrictions.*
