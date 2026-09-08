@@ -528,6 +528,136 @@ Implementations: `OpenAiProvider`, `GeminiProvider` behind `LlmProvider`; `FakeL
 - **User Panel** (`app/Livewire/Panel/*`) — tenant-scoped; every component runs inside the resolved tenant context.
 - **Admin Panel** (`app/Livewire/Admin/*`) — platform super-admin; runs in `actingAsPlatform()` mode so the tenant global scope is bypassed and cross-tenant data is visible. Guarded by a distinct `platform-admin` guard, IP allowlist, and full audit logging (reusing the existing default-admin guard rails).
 
+The two subsections below (**User Panel — Full Feature Design** and **Admin Panel — Full Feature Design**) itemize **every** feature to production-ready completeness so no panel screen is left as a stub. Every User Panel component runs inside the resolved tenant context (global `TenantScope` auto-applied, Property 1); every Admin Panel component runs under the `platform-admin` guard + IP allowlist + audit (Property 1 bypass is the only audited exception). Feature access is uniformly gated by `PlanGate` (users) / role guard (admins) and metered by `QuotaGuard`; unsupported/over-limit states **degrade to a clean, disabled+explained UI**, never a crash (Design Principle 7).
+
+#### 4.1 User Panel — Full Feature Design (28 tenant self-service features)
+
+> **Conventions.** All components live under `App\Livewire\Panel\*`; routes are under the tenant panel prefix `/app` (or the tenant subdomain root — see §Base URL). Every route passes through middleware `[auth, resolve.tenant, tenant.member, verified]`; feature-gated routes add `plan.feature:{key}` and quota-metered actions call `QuotaGuard`. **Tenant-scoping** = the component only ever reads/writes rows in the resolved tenant's scope (structural via `BelongsToTenant`). **Degrades** = what the user sees when the plan/quota/dependency blocks the feature. Requirements traced to **Block C (C1–C6)** with the specific engine requirement each feature exercises.
+
+**Group A — Account & Security (C1)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 1 | Registration (email + phone OTP) | `Panel\Auth\Register` | `GET/POST /register` | `RegistrationService`, `OtpService`, `TenantLifecycle::provision` | pre-tenant; provisions tenant+wallet+default chatbot+DEK on verify | OTP send failure → resend w/ backoff; disposable-email/velocity block (anti-fraud §Security) |
+| 2 | Login (email + phone OTP) | `Panel\Auth\Login` | `GET/POST /login` | `AuthService`, `OtpService` | binds `TenantContext` to the user's active tenant | throttle+lockout on repeated failure (reuses login-security rails) |
+| 3 | Profile management | `Panel\Account\Profile` | `GET /app/profile` | `ProfileService` | `tenant_users` row; own user only | avatar upload → signed tenant-prefixed URL |
+| 4 | Subscription / plan view | `Panel\Account\Subscription` | `GET /app/subscription` | `SubscriptionService`, `PlanGate` | reads own `subscriptions`+`plans`; upgrade/downgrade CTA | past-due → dunning banner; read-only while `SUSPENDED` |
+| 5 | Wallet / credits view + top-up | `Panel\Account\Wallet` | `GET /app/wallet` | `WalletService`, `PaymentGateway::createCheckout` | own `wallets`/`wallet_txns`; balance ≥ 0 (Property 5) | gateway down → "try again", existing balance unaffected |
+| 6 | Two-factor auth (2FA) | `Panel\Account\TwoFactor` | `GET/POST /app/security/2fa` | `TwoFactorService` (TOTP + recovery codes) | own user; enforced on next login (C1.3) | recovery-code fallback if authenticator lost |
+
+**Group B — WhatsApp Connection Self-Service (C2)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 7 | Connect own number (QR / pairing) | `Panel\Sessions\Connect` | `GET /app/sessions/connect` | `SessionManager::create`, `ChannelRouter`, `ChannelDriver::register` | `SESSIONS` quota gate (C2.2); session mapped to one tenant | quota hit → blocked w/ limit + upgrade CTA; Cloud API/BSP → credential-entry flow instead of QR |
+| 8 | View sessions / live status | `Panel\Sessions\Index` | `GET /app/sessions` | `SessionManager`, `wire:poll` | own sessions only (A2.2) | bridge down → "reconnecting", queue still accepts sends |
+| 9 | Reconnect / disconnect | `Panel\Sessions\Manage` | `POST /app/sessions/{id}/{action}` | `SessionManager::reconnect/disconnect` | own session; ownership-checked | unrecoverable auth → prompt re-scan |
+| 10 | Choose / view channel mode | `Panel\Sessions\ChannelMode` | `GET/POST /app/sessions/{id}/mode` | `ChannelRouter`, `ChannelCredentialStore` | per-mode credentials secret-redacted, envelope-encrypted (A8.4) | mode w/o credentials → disabled w/ setup hint; official-mode caveats shown |
+
+**Group C — Messaging Within Quota (C3)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 11 | Single / dual send | `Panel\Messaging\Compose` | `GET/POST /app/messaging/compose` | `SendMessageJob` via `tenantSendGate` (Alg 3/9) | `MESSAGES_*` quota; opt-out enforced (Property 3) | over-quota → defer notice + remaining count |
+| 12 | Bulk campaign | `Panel\Messaging\Campaigns` | `GET /app/campaigns` | `CampaignService`, `QuotaGuard` | `CAMPAIGNS_CONCURRENT` + message quota (C3.2) | would-exceed → start blocked, remaining shown; mid-run exhaustion → `QUOTA_PAUSED`, auto-resume |
+| 13 | Schedule (once + recurring) | `Panel\Messaging\Scheduler` | `GET /app/scheduler` | `Scheduler` (`cron-expression`) | own scheduled jobs; quota checked at fire time | quiet-hours defer; recurrence validated |
+| 14 | Media library / send | `Panel\Messaging\Media` | `GET /app/media` | `MediaService` (Intervention Image) | tenant-prefixed storage; `Media` capability per mode | mode w/o media cap → `ModeCapabilityException` surfaced as disabled |
+| 15 | Templates (use / create / version) | `Panel\Messaging\Templates` | `GET /app/templates` | `TemplateService`, `cloud_api_templates` (official modes) | own templates; Cloud API/BSP require approved template outside 24h window | Baileys → text-templated; official → sync/approval status shown |
+| 16 | Delivery status board | `Panel\Messaging\Delivery` | `GET /app/messaging/delivery` | reads `messages` (status), `wire:poll` | own messages; status never downgrades (Property 9) | out-of-order acks ignored via `rank()` |
+
+**Group D — Contacts & Groups (C4)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 17 | Contacts manage | `Panel\Contacts\Index` | `GET /app/contacts` | `ContactService` | own contacts; `CONTACTS` quota | over-quota → import blocked w/ limit |
+| 18 | Import (CSV / vCard) | `Panel\Contacts\Import` | `GET/POST /app/contacts/import` | `ContactImporter` (queued, streamed) | validates + de-dups; quota-checked | malformed rows reported, valid rows still imported |
+| 19 | Groups manage (own) | `Panel\Groups\Index` | `GET /app/groups` | `GroupService` (see §Groups Full Mgmt) | own groups; `Groups` capability (Baileys) | official mode → group ops disabled (`ModeCapabilityException`) |
+| 20 | Own-group number extraction | `Panel\Groups\Extract` | `GET/POST /app/groups/{id}/extract` | `GroupService::extractMembers` (generator, temp-table de-dup) | admin-guard; `Extraction` capability | official mode → disabled; large group → streamed job |
+| 21 | Export own data | `Panel\Contacts\Export` | `POST /app/export` | `ExportService` (CSV/TXT/JSON/XLSX/vCard) | tenant-prefixed file; signed expiring URL (A6.3) | large data → streamed + emailed link |
+
+**Group E — Chatbot Self-Service (C5)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 22 | Flow builder (no-code) | `Panel\Chatbot\FlowBuilder` | `GET /app/chatbot/flows/{id}` | `FlowRuntime`, `FlowValidator` (Alg 4) | own flows; publish blocked if invalid (B5.2) | invalid graph → failing node highlighted, publish disabled |
+| 23 | Keyword / FAQ manager | `Panel\Chatbot\Keywords` | `GET /app/chatbot/keywords` | `KeywordTriggerService`, `IntentFaqService` | own rules; priority-ordered (B3) | — |
+| 24 | AI auto-reply toggle | `Panel\Chatbot\AiSettings` | `GET/POST /app/chatbot/ai` | `PlanGate:ai`, `LlmProvider` | `ai_enabled`; `AI_CREDITS` quota | credits 0 → LLM stage skipped, falls to FAQ/fallback (B4.3); not-in-plan → hidden (C5.2) |
+| 25 | Away / business-hours | `Panel\Chatbot\BusinessHours` | `GET/POST /app/chatbot/hours` | `BusinessHoursStage` | own config; timezone-aware | outside hours → away message (B6.1) |
+
+**Group F — Reports & Support (C6)**
+
+| # | Feature | Livewire component | Route | Service / interface | Tenant-scope + plan-gate | Degrades |
+|---|---|---|---|---|---|---|
+| 26 | Campaign analytics + conversation reports | `Panel\Reports\Analytics` | `GET /app/reports` | reads `metrics_rollup` (own tenant) | own aggregates only (B7.4) | replica lag tolerated (eventual) |
+| 27 | Error logs + notifications inbox | `Panel\Reports\Errors`, `Panel\Notifications\Inbox` | `GET /app/errors`, `GET /app/notifications` | `ErrorService`, `NotificationService` | own errors/notifications; retry updates original row (A7.2) | phone numbers redacted (A7.3) |
+| 28 | Support ticket / help center + billing history & invoices | `Panel\Support\Tickets`, `Panel\Account\Invoices` | `GET /app/support`, `GET /app/invoices` | `SupportService` (`support_tickets`), `InvoiceService` (PDF) | own tickets/invoices; ticket routed to platform support (C6.2) | invoice PDF via signed URL; KB served from `kb_articles` |
+
+**Cross-cutting User Panel guarantees:** every action is (a) **tenant-scoped** structurally, (b) **plan-gated** via `PlanGate` + **quota-metered** via `QuotaGuard`, (c) **opt-out/anti-ban enforced** on every outbound path with no bypass (Property 3, Req C4.2), (d) **observable** (trace_id + `metrics_rollup`), and (e) **capability-aware** — a feature unavailable on the session's `channel_mode` renders disabled with an explanation rather than erroring at send time.
+
+#### 4.2 Admin Panel — Full Feature Design (28 platform super-admin features)
+
+> **Conventions.** All components live under `App\Livewire\Admin\*`; routes under `/admin`, behind middleware `[auth:platform-admin, ip.allowlist, admin.throttle, audit]` and executed in `TenantContext::actingAsPlatform()` (the only audited tenant-scope bypass, Req A1.5). **Guard** = `platform-admin`. **Audit** = every mutating action + impersonation + login is written to the hash-chained append-only `audit_logs` (Property 17). Requirements traced to **Block D (D1–D6)**.
+
+**Group A — User & Access Management (D1)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 1 | CRUD / suspend all users | `Admin\Users\Index` | `/admin/users` | `UserAdminService`, `TenantLifecycle::suspend` | platform-admin; audited | cross-tenant view (actingAsPlatform) |
+| 2 | CRUD / suspend all tenants | `Admin\Tenants\Index` | `/admin/tenants` | `TenantLifecycle` (provision/suspend/offboard) | platform-admin; audited | suspend blocks outbound, keeps inbound log (A1) |
+| 3 | RBAC (owner/admin/operator/viewer/agent) | `Admin\Access\Roles` | `/admin/roles` | `RbacService` (`tenant_users.role`) | platform-admin; audited | role change re-evaluated on next request |
+| 4 | Impersonate / login-as | `Admin\Users\Impersonate` | `POST /admin/users/{id}/impersonate` | `ImpersonationService` | platform-admin; **fully audited**, time-boxed | banner shown; destructive ops blocked while impersonating (D1.4) |
+| 5 | Audit-log viewer | `Admin\Audit\Index` | `/admin/audit` | `AuditService` (verify hash-chain) | platform-admin; read-only | tamper detection via chain verify (Property 17) |
+| 6 | Login security (IP allowlist / throttle / lockout) | `Admin\Security\Login` | `/admin/security` | `LoginSecurityService` | platform-admin; audited | applies to admin panel (D1.3) |
+
+**Group B — Plans & Billing (D2)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 7 | Create / manage plans & pricing | `Admin\Plans\Index` | `/admin/plans` | `PlanService` (`plans`) | platform-admin; audited | version bump invalidates plan cache |
+| 8 | Feature limits per plan | `Admin\Plans\Limits` | `/admin/plans/{id}/limits` | `PlanService` (limits JSON per `QuotaKind`) | platform-admin; audited | drives `PlanGate`/`QuotaGuard` |
+| 9 | Payment gateway config | `Admin\Billing\Gateways` | `/admin/billing/gateways` | `platform_settings` (secret, redacted), `PaymentGateway` | platform-admin; audited | keys never exposed to tenants (NFR3.3) |
+| 10 | Wallet / credit top-ups | `Admin\Billing\Wallets` | `/admin/billing/wallets` | `WalletService::topUp` (idempotent) | platform-admin; audited | manual adjust logged |
+| 11 | Coupons / discounts | `Admin\Billing\Coupons` | `/admin/coupons` | `CouponService` | platform-admin; audited | redemption limits enforced |
+| 12 | Invoices & revenue reports | `Admin\Billing\Revenue` | `/admin/revenue` | `InvoiceService`, `metrics_rollup` (replica) | platform-admin; read | cross-tenant reports from replica/rollup (D4.3) |
+
+**Group C — Platform Control (D3)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 13 | Global session monitor | `Admin\Monitor\Sessions` | `/admin/monitor/sessions` | `SessionManager` (all tenants), `wire:poll` | platform-admin; read | disconnect storms → alert (D4.2) |
+| 14 | Global campaign & queue monitor | `Admin\Monitor\Queues` | `/admin/monitor/queues` | queue depth/age metrics per lane | platform-admin; read | backpressure/shedding controls |
+| 15 | Global anti-ban / rate-limit floor | `Admin\Control\AntiBan` | `/admin/control/antiban` | `AntiBanEngine` global config | platform-admin; audited | applied as **floor** tenants cannot loosen (D3.2) |
+| 16 | Broadcast announcements | `Admin\Control\Announcements` | `/admin/announcements` | `AnnouncementService` (`announcements`) | platform-admin; audited | audience segment targeting |
+| 17 | Feature flags | `Admin\Control\FeatureFlags` | `/admin/flags` | `FeatureFlagService` (`feature_flags`) | platform-admin; audited | global or per-tenant override (D3.3) |
+| 18 | System settings (SMTP / API / LLM / gateway keys) | `Admin\Control\Settings` | `/admin/settings` | `platform_settings` (secret-redacted) | platform-admin; audited | secrets from Vault/KMS; never returned raw |
+
+**Group D — Monitoring & Health (D4)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 19 | Health dashboard (server / bridge / queue) | `Admin\Health\Dashboard` | `/admin/health` | `HealthService`, `Metrics` | platform-admin; read | traffic-light per subsystem |
+| 20 | Global error center & alerts | `Admin\Health\Errors` | `/admin/health/errors` | `ErrorService`, `alerts` (dedup fingerprint) | platform-admin; read | deduplicated alerts (D4.2) |
+| 21 | Per-user & platform usage analytics | `Admin\Analytics\Usage` | `/admin/analytics` | `metrics_rollup` (replica/warehouse) | platform-admin; read | no live-table scans (D4.3) |
+| 22 | Prometheus metrics endpoint | `MetricsController` (not Livewire) | `GET /metrics` | `Metrics` exporter (`wacb_*`) | scrape auth / network-restricted | histograms/gauges/counters |
+
+**Group E — Content & Compliance (D5)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 23 | Global templates library | `Admin\Content\Templates` | `/admin/templates` | `TemplateLibraryService` | platform-admin; audited | shared/default templates |
+| 24 | Opt-out / blocklist management | `Admin\Compliance\Blocklist` | `/admin/blocklist` | `OptOutService` (`opt_outs`) | platform-admin; audited | opt-out non-bypassable across tenants (D5.3, Property 3) |
+| 25 | Data retention & deletion | `Admin\Compliance\Retention` | `/admin/retention` | `TenantLifecycle::export/offboard`, retention policy | platform-admin; audited | right-to-delete purge + verification + signed cert (D5.2) |
+| 26 | ToS enforcement | `Admin\Compliance\Tos` | `/admin/compliance/tos` | `ComplianceService`, per-session risk/kill-switch | platform-admin; audited | offending session kill-switch |
+
+**Group F — Support (D6)**
+
+| # | Feature | Livewire component | Route | Service / interface | Guard + audit | Notes |
+|---|---|---|---|---|---|---|
+| 27 | Ticket management | `Admin\Support\Tickets` | `/admin/support` | `SupportService` (`support_tickets`/`support_messages`) | platform-admin; audited | assign/close, SLA |
+| 28 | KB/FAQ manager + segment notifications | `Admin\Support\Kb`, `Admin\Support\Notify` | `/admin/kb`, `/admin/notify` | `KbService` (`kb_articles`), `NotificationService` | platform-admin; audited | segment notification delivers only to targeted audience (D6.2) |
+
+**Cross-cutting Admin Panel guarantees:** every screen (a) runs under the `platform-admin` guard + IP allowlist + throttle/lockout, (b) is **audited** to the hash-chained append-only log (Property 17), (c) reads cross-tenant data via `actingAsPlatform()` **only** (the sole audited scope bypass, Property 1), (d) reads heavy cross-tenant analytics from **replica/rollup**, never live-table scans (D4.3), and (e) keeps platform secrets (gateway/LLM/SMTP keys) **redacted and never exposed to tenants** (NFR3.3).
+
 ### 5. Reliability primitives (new)
 
 ```php
@@ -674,6 +804,35 @@ coupons                 id, code(uniq), type(PERCENT|FIXED), value, max_redempti
 
 payment_events          id, tenant_id->null, gateway, gateway_event_id(uniq), type, payload(json),
                         processed_at, created_at   -- idempotent gateway webhook log
+
+-- ---------- Channel Mode (pluggable messaging backends) ----------
+-- sessions_wa (reused engine table) GAINS a column:
+--   sessions_wa.channel_mode  enum(BAILEYS|CLOUD_API|ON_PREMISE|BSP_GATEWAY) NOT NULL DEFAULT 'BAILEYS'
+--   idx(tenant_id, channel_mode)   -- every session declares exactly one mode (default keeps existing tenants on Baileys)
+
+channel_credentials     id, tenant_id->, mode(enum ChannelMode), provider(enum BspProvider null),
+                        label, config(json non-secret: waba_id, phone_number_id, endpoint, sender, api_version),
+                        secret_config(blob, FieldCipher envelope-encrypted: access_token, verify_token,
+                        api_key, webhook_secret), status(ACTIVE|INVALID|DISABLED), verified_at, updated_at
+                        uniq(tenant_id, mode, provider, label)   idx(tenant_id, mode)
+                        -- secret_config NEVER returned raw to UI/logs; decrypted in-request only
+
+cloud_api_templates     id, tenant_id->, credential_id->channel_credentials, name, language,
+                        category(MARKETING|UTILITY|AUTHENTICATION), body, components(json),
+                        status(PENDING|APPROVED|REJECTED|PAUSED), provider_template_id, synced_at
+                        uniq(tenant_id, credential_id, name, language)   idx(tenant_id, status)
+                        -- approved template registry for CLOUD_API / ON_PREMISE / BSP (outside 24h window)
+
+channel_webhook_routes  id, tenant_id->, session_id->sessions_wa, mode(enum ChannelMode),
+                        route_key(uniq), verify_token_hash null, signing_secret_ref, active
+                        idx(tenant_id, mode)
+                        -- maps an incoming provider webhook (Meta phone-number-id / BSP sender) -> tenant+session+driver
+
+channel_send_log        id(ulid), tenant_id->, session_id->, mode(enum ChannelMode), provider null,
+                        capability(enum ChannelCapability), idempotency_key(uniq), result(SENT|BLOCKED|FAILED|FAILED_OVER),
+                        block_reason null, provider_message_id, failover_from(enum ChannelMode null), created_at
+                        idx(tenant_id, session_id, created_at)
+                        -- per-send audit incl. capability-block (ModeCapabilityException) and failover events
 
 -- ---------- Conversational AI ----------
 chatbots                id, tenant_id->, name, enabled, ai_enabled, default_flow_id->flows null,
@@ -825,9 +984,12 @@ enum TenantTier: string { case Shared='SHARED'; case DedicatedWorker='DEDICATED_
 enum RagDriver: string { case Mysql='mysql'; case Pgvector='pgvector'; case Qdrant='qdrant'; }
 enum AgentKind: string { case Router='ROUTER'; case Specialist='SPECIALIST'; }
 enum FlowAnalyticsEvent: string { case Enter='ENTER'; case Complete='COMPLETE'; case Drop='DROP'; case Error='ERROR'; }
+enum ChannelMode: string { case Baileys='BAILEYS'; case CloudApi='CLOUD_API'; case OnPremise='ON_PREMISE'; case BspGateway='BSP_GATEWAY'; }
+enum ChannelCapability: string { case SendSingle='SEND_SINGLE'; case SendBulk='SEND_BULK'; case Media='MEDIA'; case FreeFormAnytime='FREE_FORM_ANYTIME'; case Template='TEMPLATE'; case Interactive='INTERACTIVE'; case Groups='GROUPS'; case Welcome='WELCOME'; case Extraction='EXTRACTION'; case Tagging='TAGGING'; case Channels='CHANNELS'; case InboundWebhook='INBOUND_WEBHOOK'; case DeliveryReceipts='DELIVERY_RECEIPTS'; }
+enum BspProvider: string { case Twilio='TWILIO'; case ThreeSixtyDialog='360DIALOG'; case Gupshup='GUPSHUP'; case Vonage='VONAGE'; case MessageBird='MESSAGEBIRD'; case Infobip='INFOBIP'; case Wati='WATI'; case Kaleyra='KALEYRA'; }
 ```
 
-Reused engine enums (`SessionStatus`, `MessageStatus`, `WaStatus`) are unchanged.
+Reused engine enums (`SessionStatus`, `MessageStatus`, `WaStatus`) are unchanged. The reused `sessions_wa` table gains a `channel_mode` (`ChannelMode`) column defaulting to `BAILEYS`, so existing single-tenant/Baileys behaviour is preserved with zero official-API setup.
 
 ---
 
@@ -1315,6 +1477,54 @@ These are the invariants the test suite (property-based where noted) must hold. 
 
 **Validates: Requirements A1.2, B4.1**
 
+### Property 21: Channel-mode capability gating (unsupported op never dispatched)
+
+∀ session s, ∀ operation op requiring capability `cap` → if `driverFor(s).supports(cap) = false` then op is rejected with a typed `ModeCapabilityException` **before** any driver call and is **never dispatched** to that driver (no crash, no silent no-op). E.g. a group/extraction/welcome/tagging op on a `CLOUD_API`/`BSP_GATEWAY`/`ON_PREMISE` session, or a `sendTemplate` on `BAILEYS`, always fails cleanly. *(Property test: random (mode, capability) pairs; assert unsupported ⇒ exception raised and driver.send/manage not invoked.)*
+
+**Validates: Requirements A8.1, A8.2** *(new requirement; deepens A5.2 capability-gating pattern)*
+
+### Property 22: Exactly-one-driver routing
+
+∀ outbound message m on session s → `resolveDriver(s)` returns exactly the driver whose `mode() = s.channel_mode`, and m is dispatched to that one driver only (never to a driver of another mode, never to zero or two drivers); likewise every inbound webhook for s is parsed by exactly that driver. *(Property test: seed sessions across all modes; assert each message/webhook lands on the driver matching its session's `channel_mode`.)*
+
+**Validates: Requirements A8.3** *(new requirement; deepens A2.5, B1.1)*
+
+### Property 23: Per-session mode isolation & credential scoping
+
+∀ tenant t, ∀ mode-specific credentials/config → a driver for session s only ever reads `channel_credentials` for `(t, s.channel_mode)`; no session's send/inbound uses another tenant's or another mode's credentials, and secret fields are never returned raw (redacted in UI/logs, envelope-encrypted at rest). *(Property test: 2 tenants × multiple modes; assert credential resolution is disjoint by (tenant, mode) and secrets are masked.)*
+
+**Validates: Requirements A8.4, NFR3.3** *(new requirement; reuses per-tenant `FieldCipher`)*
+
+### Property 24: Anti-ban applies iff web-protocol mode
+
+∀ send on session s → the anti-ban warm-up/rate/quiet-hours gate is invoked **iff** `driverFor(s).requiresAntiBan() = true` (i.e. `BAILEYS`/`ON_PREMISE`); for official modes (`CLOUD_API`/`BSP_GATEWAY`) the anti-ban warm-up ramp is bypassed and the provider's template/24-hour-window/rate rules are enforced instead — and no configuration can bypass anti-ban on a web-protocol mode. *(Property test: random sends across modes; assert anti-ban gate called exactly on web-protocol modes and template-window rule enforced on official modes.)*
+
+**Validates: Requirements A8.5, A4.2** *(new requirement; deepens A4 anti-ban guarantee)*
+
+### Property 25: Group admin-op rejected before any bridge call; welcome exactly once per join
+
+∀ group operation op requiring group-admin (add/remove/promote/demote/settings/tag) → if the bot is **not** an admin of that group, op is rejected with `NotGroupAdminException` **before** any bridge mutation is issued (the bridge is never called). And ∀ member join event j → the configured welcome is enqueued **exactly once** for j; a rejoin with the same `join_epoch` is a no-op (duplicate-guarded). *(Property test: random groups with bot-admin true/false → assert bridge.mutate not invoked when false; random join/rejoin sequences → assert exactly-one welcome per distinct join epoch.)*
+
+**Validates: Requirements A5.2, A5.3**
+
+### Property 26: Channel/group op unsupported by session mode fails typed, never crashes
+
+∀ session s, ∀ channel-management or group-management operation op → if `driverFor(s).supports(cap) = false` (i.e. s is on an official mode for a Baileys-only capability such as `Channels`/`Groups`/`Extraction`/`Tagging`/`Welcome`) then op raises a typed `ModeCapabilityException` **before** any driver call and returns a clean error — never a crash, never a silent no-op, never a partial side effect. *(Property test: random (mode, channel/group op) pairs; assert unsupported ⇒ typed exception and no driver/bridge invocation.)*
+
+**Validates: Requirements A8.2, A6.2, A5.1** *(reuses the capability-gating pattern; deepens A5/A6 for official modes)*
+
+### Property 27: Canonical-host URL generation (no host-header injection)
+
+∀ absolute link, webhook callback, or signed URL emitted by the platform → its host is the configured canonical base (`BaseUrl::platform()`/`forTenant()`), **never** derived from the request `Host`/`X-Forwarded-Host` header; a signed URL's signature binds the canonical host, so a valid signature cannot be replayed against a different host, and requests to non-allowlisted hosts are rejected. *(Property test: vary the incoming Host header arbitrarily; assert generated URLs and signature host are unchanged and injection is impossible.)*
+
+**Validates: Requirements A9.1, A9.4, NFR3.2** *(new requirement A9 — Base URL configuration)*
+
+### Property 28: Every listed feature is production-complete (no stub in prod paths)
+
+∀ feature f listed in §4.1 (28 User Panel), §4.2 (28 Admin Panel), §Channels Full Mgmt, §Groups Full Mgmt, or §Channel Mode → f resolves to a concrete implementation in the production container (no `Fake*`/`Stub*` binding, no `NotImplementedException`/`TODO` in `app/`), and its absence-of-optional-dependency path is a real, tested degradation (not a stub). *(Property/CI test: scan production bindings and `app/` namespaces; assert no test-double or unimplemented marker is reachable from a non-test path, and every §4.1/§4.2/channel/group/mode feature maps to a task.)*
+
+**Validates: Requirements C1–C6, D1–D6, A5, A6, A8, A9** *(Definition-of-Done completeness guarantee)*
+
 ---
 
 ## Error Handling
@@ -1337,6 +1547,13 @@ AppException
 │   ├── LlmProviderException            → 502, retryable (falls back to no-AI stages)
 │   ├── GroundingFailedException        → internal; downgrade/drop unsupported claim or handoff
 │   └── ToolInvocationException         → internal; JSON-repair retry then rule-based fallback
+├── ChannelException
+│   ├── ModeCapabilityException         → 422/409, non-retryable (op unsupported by session's channel_mode; never dispatched)
+│   ├── TemplateRequiredException       → 422, non-retryable (official mode, outside 24h window, no approved template)
+│   ├── ChannelRegistrationException    → 502, retryable (Cloud API WABA / BSP number registration failed)
+│   ├── ChannelCredentialException      → 400/401, non-retryable (missing/invalid per-mode credentials)
+│   ├── NotGroupAdminException          → 409, non-retryable (bot not group admin; rejected BEFORE any bridge call, Property 25)
+│   └── NotChannelAdminException        → 409, non-retryable (bot not channel admin; rejected before any bridge call)
 ├── ResilienceException
 │   ├── CircuitOpenException            → fast-fail; triggers fallback chain (never crashes job)
 │   └── SagaCompensatedException        → 409/internal; all steps compensated, safe to retry saga
@@ -1371,6 +1588,10 @@ AppException
 | KMS/DEK fetch fails | `KeyUnavailableException` | 503 retryable; **no plaintext fallback** | Retry after KMS recovers |
 | STT provider down | transcribe fails | Ack voice note, ask user to type (degraded) | Retry when provider back |
 | Relay/outbox crash mid-send | worker dies | Row stays `PENDING`; redelivered on restart; consumer dedups | Exactly-once effect preserved |
+| Unsupported op for mode (e.g. group send on `CLOUD_API`) | `driver.supports(cap)=false` | `ModeCapabilityException` before any driver call; logged to `channel_send_log` (BLOCKED); never dispatched | Use a Baileys session for that op, or switch mode |
+| Official mode, outside 24h window, no template | `outsideSessionWindow` & not approved template | `TemplateRequiredException`; send blocked, tenant prompted to use an approved template | Send approved template / wait for user reply |
+| Channel mode primary down (failover configured) | primary driver breaker OPEN / retryable fail | Router advances to next driver in `failoverChain`; anti-ban re-enabled if falling back to a web-protocol mode | Primary auto-recovers; failover event audited |
+| Missing/invalid per-mode credentials | Cloud API token / BSP api key absent or rejected | `ChannelCredentialException`; that mode cannot be selected/sent; platform keeps working on `BAILEYS` | Tenant re-enters credentials; re-verify |
 
 **Graceful degradation modes (what still works when a dependency is down):**
 
@@ -1382,6 +1603,7 @@ AppException
 | Payment gateway | messaging, chatbot, panels | new checkouts/top-ups (retry); existing subs unaffected until renewal |
 | Redis (if adopted) | everything (auto-fallback to MySQL queue/cache/locks) | peak throughput headroom |
 | KMS | reads of already-decrypted-in-request data | new encrypt/decrypt of sensitive fields (fail-closed) |
+| Meta Cloud API / BSP (a mode) | all `BAILEYS` sessions unaffected; optional failover to a Baileys session; queue holds sends for the affected session | official-mode sends for that session (auto-resume on recovery / failover) |
 
 ---
 
@@ -1389,11 +1611,11 @@ AppException
 
 **Unit (Pest):** resolution-pipeline ordering, flow node evaluation for each node type, flow graph validation (reachability/termination), quota arithmetic, wallet non-negativity, gateway idempotency, language/sentiment heuristics, coupon math, proration.
 
-**Property-based (Pest + a generator helper, mirroring the engine's approach):** properties **1–20** above. Notably tenant isolation (random 2-tenant seed, assert read disjointness), single-reply, quota-no-double-count under random retry interleavings, flow termination over randomly generated *valid* graphs, **RAG citation ⊆ retrieved & tenant-scoped (11, 20), semantic-cache soundness (12), circuit-breaker never-invokes-while-open (13), event-log monotonicity + projection replay (14), PII redaction round-trip (15), outbox exactly-once under crash interleavings (16), audit hash-chain tamper detection (17), saga all-or-compensated with per-step fault injection (18), weighted-fair scheduling (19)**.
+**Property-based (Pest + a generator helper, mirroring the engine's approach):** properties **1–20** above. Notably tenant isolation (random 2-tenant seed, assert read disjointness), single-reply, quota-no-double-count under random retry interleavings, flow termination over randomly generated *valid* graphs, **RAG citation ⊆ retrieved & tenant-scoped (11, 20), semantic-cache soundness (12), circuit-breaker never-invokes-while-open (13), event-log monotonicity + projection replay (14), PII redaction round-trip (15), outbox exactly-once under crash interleavings (16), audit hash-chain tamper detection (17), saga all-or-compensated with per-step fault injection (18), weighted-fair scheduling (19), tenant-scoped retrieval isolation (20), channel-mode capability gating never-dispatches-unsupported (21), exactly-one-driver routing per session mode (22), per-session mode/credential isolation (23), anti-ban-applies-iff-web-protocol-mode (24), group admin-op rejected before bridge + welcome exactly-once-per-join (25), channel/group op unsupported-by-mode fails typed (26), canonical-host URL generation / no host-header injection (27), and no-stub-in-production completeness (28, CI-enforced)**.
 
-**Feature:** `FakeBridgeClient` + `FakeLlmProvider` + `FakeGateway` + `FakeVectorStore` + `FakeEmbedder` + `FakeStt` + `FakeKms` bound in the container. Full inbound→reply flow, handoff lifecycle, flow builder publish, subscription lifecycle via fake gateway webhooks, wallet top-up/debit, plan upgrade/downgrade proration, RAG ingest→retrieve→cite, model-router escalation, A/B sticky assignment, saga order-fulfilment with injected failures, tenant offboarding + hard-delete verification.
+**Feature:** `FakeBridgeClient` + `FakeChannelDriver` (per-mode, configurable capabilities) + `FakeLlmProvider` + `FakeGateway` + `FakeVectorStore` + `FakeEmbedder` + `FakeStt` + `FakeKms` bound in the container. Channel-mode coverage: send routing across all four modes, capability-block (`ModeCapabilityException`) for group/extraction ops on official modes, template-required outside the 24h window, `CLOUD_API`→`BAILEYS` failover with anti-ban re-enabled, per-tenant/per-mode credential resolution + secret redaction. Full inbound→reply flow, handoff lifecycle, flow builder publish, subscription lifecycle via fake gateway webhooks, wallet top-up/debit, plan upgrade/downgrade proration, RAG ingest→retrieve→cite, model-router escalation, A/B sticky assignment, saga order-fulfilment with injected failures, tenant offboarding + hard-delete verification.
 
-**HTTP / Panel:** every User Panel and Admin Panel route — tenant scope enforced, RBAC enforced, platform-admin routes require the platform guard + IP allowlist. Livewire component tests for the flow builder canvas and live inbox.
+**HTTP / Panel:** **every one of the 28 User Panel routes (§4.1) and 28 Admin Panel routes (§4.2)** — tenant scope enforced, plan-gate + quota enforced (users), RBAC enforced, platform-admin routes require the platform guard + IP allowlist + audit. A per-feature test asserts each component's tenant-scoping, plan/role gate, and graceful-degradation state. Livewire component tests for the flow builder canvas, live inbox, session channel-mode selector, group manager, and channel manager. **Group management:** create/delete/metadata, participant add/remove/promote/demote with WA status-code mapping (`ADDED`/`INVITE_SENT`/`ALREADY_MEMBER`/`FAILED`), settings toggles (audited), ordered auto-approve rules (blocklist→country→regex→manual), welcome exactly-once-per-join + rotation, generator extraction + temp-table de-dup + active filter, chunked bulk add, tag-all 200-per-chunk + cooldown + admin-guard, and admin-guard-before-bridge (Property 25). **Channel management:** create/delete/metadata, subscriber/admin management, follow/mute, text/media/poll post, scheduled+recurring + calendar, delta-from-snapshot analytics, and capability-gating (`ModeCapabilityException`) on official modes (Property 26). **Base URL:** absolute/webhook/signed URLs built from the canonical base under arbitrary `Host` headers, per-tenant subdomain/custom-domain resolution, and signature host-binding (Property 27). **Completeness:** a CI test scans production bindings and `app/` for `Fake*`/`Stub*`/`NotImplementedException`/`TODO` (Property 28).
 
 **Load:** N tenants each running campaigns concurrently — assert per-tenant rate limits and quotas hold independently, no cross-tenant queue starvation (fair lane scheduling), zero duplicate `wa_message_id`.
 
@@ -1730,6 +1952,548 @@ Inbound voice notes are transcribed via `SpeechToText` (optional) into `media_tr
 
 ---
 
+## Channel Mode — Pluggable Messaging Backends (Deep Dive)
+
+> **Net-new subsystem.** Today the platform sends and receives WhatsApp traffic through exactly one backend: the thin **Node + Baileys "WA Bridge"** (WhatsApp Web multi-device protocol). This section generalizes that single wire into a **pluggable, per-tenant *and* per-session selectable messaging backend** — a **Channel Mode**. A tenant can choose, per connected number, *how* that number talks to WhatsApp: the unofficial Baileys web protocol (full features, higher ban risk), Meta's official Cloud API (lower ban risk, stricter rules), the legacy On-Premise API, or an official BSP/gateway partner (Twilio, 360dialog, Gupshup, …).
+>
+> **Scope note (new requirements implied).** This introduces a genuinely new capability that will require a **new requirement on regeneration: Requirement A8 — Channel Mode / pluggable messaging backends** (see §New Requirements). It deepens A2 (sessions), A3 (messaging/send gate, Algorithm 3), A4 (anti-ban), A5/A6 (groups/channels/extraction capability-gating), B1 (inbound webhook routing), and NFR2/NFR4 (reliability/maintainability).
+>
+> **MySQL-only / Baileys default still holds (Design Principle 3 & 9).** `BAILEYS` remains the zero-official-API default: a tenant needs **no** Meta WABA, no Cloud API token, and no BSP account to run the platform end-to-end. Every other mode is opt-in config; when its credentials are absent that mode simply cannot be selected, and the platform keeps working on Baileys.
+
+### 2.1 Motivation & the abstraction
+
+The existing `BridgeClient` interface already keeps the send/receive wire behind a swappable contract (Design Principle 1, NFR4.1). Channel Mode **generalizes `BridgeClient` into a driver family**: `BridgeClient` becomes the **transport contract** that every channel driver implements, and a `ChannelMode` value on each session selects *which* driver instance handles that session. The current `HttpBridgeClient` (Baileys) becomes **one driver among several** (`BaileysChannelDriver`) — no behavioural change for existing tenants.
+
+```mermaid
+graph TD
+    subgraph PHP[PHP-FPM 8.3 - Laravel 11]
+        SP[Send Pipeline - Algorithm 3 tenantSendGate]
+        WH[Inbound + Delivery Webhooks - HMAC]
+        SM[SessionManager]
+        AB[AntiBanEngine]
+    end
+    SP --> RES{ChannelRouter - session.channel_mode}
+    WH --> RES
+    SM --> RES
+    RES -->|BAILEYS| D1[BaileysChannelDriver - HttpBridgeClient]
+    RES -->|CLOUD_API| D2[CloudApiChannelDriver]
+    RES -->|ON_PREMISE| D3[OnPremiseChannelDriver]
+    RES -->|BSP_GATEWAY| D4[BspGatewayChannelDriver]
+    RES -->|tests| D5[FakeChannelDriver]
+    D1 --> BR[WA Bridge - Node + Baileys - WA Web multi-device]
+    D2 --> META[Meta WhatsApp Cloud API - graph.facebook.com]
+    D3 --> ONP[On-Premise / Business App API container - self-hosted]
+    D4 --> BSP[BSP partners: Twilio / 360dialog / Gupshup / Vonage / MessageBird / Infobip / WATI / Kaleyra]
+    D1 -. anti-ban gate .- AB
+    D3 -. anti-ban gate .- AB
+    D2 -. provider template/rate rules .- META
+    D4 -. provider template/rate rules .- BSP
+    BR -. inbound HMAC .-> WH
+    META -. inbound webhook + verify token .-> WH
+    ONP -. inbound webhook .-> WH
+    BSP -. inbound webhook .-> WH
+```
+
+**Key structural points:**
+
+- A single **`ChannelRouter`** resolves `session.channel_mode → ChannelDriver` for *every* outbound send, inbound webhook, and management operation. A message is dispatched to **exactly one** driver — the driver of its session's mode (Correctness Property 22).
+- Baileys and On-Premise are **WhatsApp-web-protocol** modes → the existing **anti-ban gate** (warm-up ramp, gaussian delay, quiet hours, risk scoring) applies unchanged. Cloud API and BSP are **official** modes → they follow the **provider's own rate limits + template/24-hour-window rules** instead of the anti-ban warm-up ramp (documented branch below; Property 24).
+- Capabilities differ per mode. Any operation a session's mode does not support is **rejected up-front with a typed `ModeCapabilityException`, never a crash** — reusing the existing capability-handshake/gating pattern used for rich messages and group-admin checks (Correctness Property 21).
+
+### 2.2 The four modes (+ test double)
+
+| # | Mode (`ChannelMode`) | Driver | What it is | Ban risk / compliance | Anti-ban engine |
+|---|---|---|---|---|---|
+| 1 | `BAILEYS` **(default)** | `BaileysChannelDriver` | Existing Node + Baileys bridge; **WhatsApp Web multi-device** reverse-engineered protocol | **Highest** — unofficial; anti-ban **mandatory** | **Applies (full)** |
+| 2 | `CLOUD_API` | `CloudApiChannelDriver` | **Meta WhatsApp Cloud API** (official Business Platform, Meta-hosted) | **Lowest** — official; strict template/session-window rules | Provider rules (no warm-up ramp) |
+| 3 | `ON_PREMISE` | `OnPremiseChannelDriver` | **WhatsApp Business App / On-Premise API** (legacy, self-hosted client container) | Low-medium — official but **deprecated by Meta** | **Applies** (web-protocol-adjacent, self-hosted) |
+| 4 | `BSP_GATEWAY` | `BspGatewayChannelDriver` | **Third-party BSP / gateway partners** (Twilio, 360dialog, Gupshup, Vonage, MessageBird, Infobip, WATI, Kaleyra, …) on official partner routes | Low — official via partner; partner + Meta rules | Provider rules (per-provider) |
+| — | *(tests)* | `FakeChannelDriver` | Deterministic in-memory driver | n/a | configurable |
+
+**Mode 1 — Baileys Bridge (default, full feature set).** Unchanged from the current design: groups (create/admin/settings/approve/welcome/tagging), channels/newsletters, all media, member extraction + active-number filtering + export, templates-as-text, interactive buttons/lists where the WA version supports them. Because it rides the WhatsApp Web protocol on an unregistered/consumer number, **ban risk is real** → the **anti-ban engine is required and non-bypassable** (Req A4, unchanged). This is the only mode that needs **zero** official-API onboarding.
+
+**Mode 2 — Meta WhatsApp Cloud API (official).**
+- **Capabilities:** single + bulk send, media (image/doc/audio/video/sticker), **template messages** (pre-approved, for messages outside the 24-hour customer-service window), **interactive buttons/lists**, official **inbound webhooks** (with `verify_token` handshake) and **delivery/read receipts**, phone-number registration under a **WABA (WhatsApp Business Account)**.
+- **Limitations vs Baileys (must degrade cleanly):** **no group management** (create/admin/tag/welcome), **no channels/newsletters management**, **no member extraction/scraping**, free-form messages only allowed **inside a 24-hour user-initiated window** — outside it, **only approved templates** may be sent. Bulk to cold audiences must be template-based and quality-rated (Meta messaging limits / tiered throughput). Every unsupported op → `ModeCapabilityException` (never crash).
+- **Onboarding:** WABA id + phone-number id + system-user **access token** + webhook **verify token**; number is registered/migrated into the Cloud API (a number on Cloud API cannot simultaneously run on the consumer app). **Lower ban risk** and higher deliverability are the trade for stricter rules and per-conversation pricing.
+
+**Mode 3 — WhatsApp Business App API / On-Premise (legacy, deprecated).**
+- Self-hosted Business/On-Premise API client (container) — an **official** route historically used before Cloud API. **Meta has deprecated the On-Premise API**; new onboarding is closed and sunset is ongoing.
+- **Supported for tenants who still run it**, with a **documented migration path → Cloud API** (`ON_PREMISE → CLOUD_API`: register the number on Cloud API, re-point webhooks, migrate templates). Capability set is close to Cloud API (templates, session window, media, interactive) but **self-hosted** (tenant runs the container). Marked **deprecated** in the capability matrix and UI so tenants are steered to Cloud API or a BSP.
+
+**Mode 4 — Third-party BSP / Gateway providers (official partner routes).**
+- One driver, **many providers** behind a per-provider adapter: **Twilio, 360dialog, Gupshup, Vonage (Nexmo), MessageBird, Infobip, WATI, Kaleyra**, and any future partner. Each is an official **Business Solution Provider** fronting Meta, so it inherits Cloud-API-style rules (templates, session window, official webhooks, delivery receipts) with **per-provider quirks** (endpoint, auth scheme, template sync API, media handling).
+- Capabilities are declared by a **per-provider capability sub-matrix** (below) resolved at runtime from provider config, so the same `BspGatewayChannelDriver` reports different `supports()` per provider. Unsupported ops → `ModeCapabilityException`.
+
+### 2.3 Capability matrix (mode → capability)
+
+Every driver implements `supports(ChannelCapability): bool`. The router/pipeline consults it **before** dispatch; a `false` short-circuits to a typed `ModeCapabilityException` (Property 21). `✅ native · ⚠️ degraded/conditional · ❌ unsupported → ModeCapabilityException`.
+
+| Capability (`ChannelCapability`) | `BAILEYS` | `CLOUD_API` | `ON_PREMISE` (deprecated) | `BSP_GATEWAY` |
+|---|:---:|:---:|:---:|:---:|
+| Single send (text) | ✅ | ✅ | ✅ | ✅ |
+| Bulk send | ✅ (anti-ban paced) | ⚠️ template + quality tier | ⚠️ template + tier | ⚠️ per-provider tier |
+| Media (image/doc/audio/video/sticker) | ✅ | ✅ | ✅ | ⚠️ per provider |
+| Free-form text anytime | ✅ | ⚠️ only in 24h session window | ⚠️ 24h window | ⚠️ 24h window |
+| Template messages (approved) | ⚠️ text-templated only | ✅ | ✅ | ✅ (provider template sync) |
+| Buttons / lists / interactive | ⚠️ if WA version supports | ✅ | ✅ | ⚠️ per provider |
+| Group management (create/admin/settings) | ✅ | ❌ | ❌ | ❌ |
+| Auto-welcome on join | ✅ | ❌ | ❌ | ❌ |
+| Group member extraction / active-number filter | ✅ | ❌ | ❌ | ❌ |
+| Tagging (tag all / selective / custom) | ✅ | ❌ | ❌ | ❌ |
+| Channels / newsletters management | ✅ | ❌ | ❌ | ❌ |
+| Inbound webhooks (customer messages) | ✅ (bridge HMAC) | ✅ (Meta + verify token) | ✅ | ✅ (provider signature) |
+| Delivery / read receipts | ✅ | ✅ | ✅ | ⚠️ per provider |
+| Anti-ban warm-up / rate ramp needed | ✅ **mandatory** | ❌ (provider rules) | ✅ | ❌ (provider rules) |
+| Zero official-API onboarding | ✅ | ❌ | ❌ | ❌ |
+
+> **BSP per-provider sub-matrix** (resolved from `channel_credentials.meta`): e.g. Twilio & Vonage do buttons/lists via content templates; 360dialog/Gupshup/WATI expose Cloud-API-equivalent interactive + template-sync APIs; media size/type caps vary. The driver reports each provider's real `supports()` at runtime rather than assuming one profile.
+
+### 2.4 Driver interface (PHP)
+
+`ChannelDriver` **extends** the existing `BridgeClient` transport contract (so Baileys' current implementation satisfies it unchanged) and adds capability declaration, official-webhook handling, and template/registration hooks that only official modes use.
+
+```php
+namespace App\Services\Channel;
+
+enum ChannelMode: string {
+    case Baileys    = 'BAILEYS';       // default: Node + Baileys WA Web multi-device
+    case CloudApi   = 'CLOUD_API';     // Meta WhatsApp Cloud API (official)
+    case OnPremise  = 'ON_PREMISE';    // WhatsApp Business/On-Premise API (deprecated)
+    case BspGateway = 'BSP_GATEWAY';   // Twilio / 360dialog / Gupshup / Vonage / ... (official BSP)
+}
+
+enum ChannelCapability: string {
+    case SendSingle='SEND_SINGLE'; case SendBulk='SEND_BULK'; case Media='MEDIA';
+    case FreeFormAnytime='FREE_FORM_ANYTIME'; case Template='TEMPLATE'; case Interactive='INTERACTIVE';
+    case Groups='GROUPS'; case Welcome='WELCOME'; case Extraction='EXTRACTION'; case Tagging='TAGGING';
+    case Channels='CHANNELS'; case InboundWebhook='INBOUND_WEBHOOK'; case DeliveryReceipts='DELIVERY_RECEIPTS';
+}
+
+/** Every messaging backend implements this. Baileys' existing HttpBridgeClient satisfies BridgeClient unchanged. */
+interface ChannelDriver extends \App\Services\Bridge\BridgeClient
+{
+    public function mode(): ChannelMode;
+
+    /** Capability gate — consulted BEFORE dispatch; false ⇒ ModeCapabilityException (never a crash). */
+    public function supports(ChannelCapability $cap): bool;
+
+    /** Whether this web-protocol mode must pass the anti-ban warm-up/rate gate (Baileys/On-Prem = true). */
+    public function requiresAntiBan(): bool;
+
+    /** Send an outbound message via this backend; MUST be idempotent on $content->idempotencyKey. */
+    public function send(Session $session, OutboundContent $content): SendReceipt;
+
+    /** Parse & verify a provider-specific inbound/delivery webhook into the platform's canonical event. */
+    public function parseWebhook(Request $r, ChannelCredentials $creds): InboundEvent;
+
+    /** Official modes only: send/sync approved templates. Baileys ⇒ ModeCapabilityException. */
+    public function sendTemplate(Session $session, TemplateRef $tpl, array $vars): SendReceipt;
+
+    /** Register/verify the number for this mode (Cloud API: WABA/phone-number id; BSP: provider number). */
+    public function register(Session $session, ChannelCredentials $creds): RegistrationResult;
+
+    public function healthCheck(ChannelCredentials $creds): ChannelHealth;
+}
+
+/** Resolves session.channel_mode → the correct driver, for send / inbound / management. */
+interface ChannelRouter
+{
+    public function driverFor(Session $session): ChannelDriver;      // exactly-one (Property 22)
+    public function driverForMode(ChannelMode $mode, Tenant $t): ChannelDriver;
+
+    /** Optional per-tenant failover chain (e.g. CLOUD_API primary → BAILEYS fallback), circuit-breaker gated. */
+    public function failoverChain(Session $session): array;          // [primaryDriver, ...fallbacks]
+
+    /** Throws ModeCapabilityException if the session's mode does not support $cap. */
+    public function assertSupported(Session $session, ChannelCapability $cap): void;
+}
+
+/** Per-tenant, per-mode credentials/config — secret-redacted, envelope-encrypted (FieldCipher). */
+interface ChannelCredentialStore
+{
+    public function for(Tenant $t, ChannelMode $mode): ChannelCredentials; // decrypted in-request only
+    public function put(Tenant $t, ChannelMode $mode, array $secretConfig): void; // encrypted at rest
+}
+```
+
+Concrete drivers: **`BaileysChannelDriver`** (wraps the existing `HttpBridgeClient` — the current bridge, unchanged), **`CloudApiChannelDriver`**, **`OnPremiseChannelDriver`**, **`BspGatewayChannelDriver`** (with per-provider adapters), plus **`FakeChannelDriver`** for tests. All are bound behind `ChannelDriver`, so adding a future backend is a new class + enum case + credential shape — never a rewrite (NFR4).
+
+### 2.5 Per-session mode selection & the send/inbound path
+
+Each WhatsApp session stores **which mode it uses** (`sessions_wa.channel_mode`, default `BAILEYS`). Every subsystem respects it:
+
+- **`SessionManager::create`** records the chosen `channel_mode` and, for official modes, calls `driver->register(...)` (Cloud API WABA/phone-number verification, BSP number provisioning) before marking the session live. A Baileys session still just pairs via QR.
+- **Send pipeline (Algorithm 3 `tenantSendGate`)** — extended to resolve the driver and branch anti-ban by mode (Algorithm 9 below). Plan gate + quota are **mode-independent** (a message is a message for billing); the **anti-ban gate runs only when `driver->requiresAntiBan()`** — otherwise the provider's own template/rate rules apply.
+- **Inbound webhook routing (B1)** — the webhook controller resolves tenant + session, then `router->driverFor(session)->parseWebhook(...)` normalizes the provider-specific payload (Baileys HMAC / Meta `verify_token` + signature / BSP signature) into one canonical `InboundEvent` fed to the ConversationEngine. Provider→session mapping lives in `channel_webhook_routes`.
+- **Capability-sensitive services** (groups, welcome, extraction, tagging, channels) call `router->assertSupported(session, cap)` first; on an official mode this throws `ModeCapabilityException` **before** any driver call — exactly how group-admin checks already reject ops pre-Bridge-call (Req A5.2 pattern).
+
+### Algorithm 9 — Mode-aware send gate (extends Algorithm 3)
+
+```php
+function channelSendGate(session, message): GateVerdict
+```
+**Preconditions:** `session.tenant_id = message.tenant_id`; `session.channel_mode` set; plan/quota gate (Algorithm 3) already passed or is composed before this step.
+**Postconditions:** message is handed to **exactly one** driver — the one for `session.channel_mode`; an operation unsupported by that mode is rejected with `ModeCapabilityException` and never dispatched; anti-ban warm-up/rate applies **iff** the mode is a web-protocol mode; official modes enforce template/session-window rules instead.
+
+```pascal
+ALGORITHM channelSendGate(session, message)
+BEGIN
+    driver <- channelRouter.driverFor(session)          // exactly-one by session.channel_mode
+
+    cap <- capabilityFor(message)                       // e.g. GROUPS, TEMPLATE, INTERACTIVE, SEND_BULK
+    IF NOT driver.supports(cap) THEN
+        RETURN block(MODE_CAPABILITY, ModeCapabilityException(session.channel_mode, cap))
+    END IF
+
+    IF driver.requiresAntiBan() THEN                    // BAILEYS, ON_PREMISE
+        v <- antiBanEngine.gate(message)                // unchanged warm-up/rate/quiet-hours
+        IF v.defer THEN RETURN defer(v.seconds) END IF
+        IF v.block THEN RETURN block(v.reason) END IF
+    ELSE                                                // CLOUD_API, BSP_GATEWAY
+        IF outsideSessionWindow(session, message) AND NOT message.isApprovedTemplate THEN
+            RETURN block(TEMPLATE_REQUIRED)             // official 24h-window rule
+        END IF
+        r <- driver.providerRateVerdict(message)        // provider tier / messaging limit
+        IF r.defer THEN RETURN defer(r.seconds) END IF
+    END IF
+
+    RETURN allow(driver)                                // caller dispatches via this exact driver
+END
+```
+
+### 2.6 Routing & fallback
+
+- **Routing:** `ChannelRouter::driverFor(session)` is the single point that maps `channel_mode → driver`; the send pipeline, inbound webhook, and management services all go through it, so routing is **exactly-once and centralized** (Property 22).
+- **Optional per-tenant multi-mode failover** (opt-in, plan-gated): a tenant may configure a chain, e.g. **`CLOUD_API` primary → `BAILEYS` fallback**. If the primary driver's **circuit breaker** (reuse §Reliability `CircuitBreaker`, scope `(channel, mode:sessionId)`) is OPEN or the send fails as retryable, the router advances to the next driver in `failoverChain(session)`. **Trade-offs, documented:** a Cloud-API→Baileys fallback silently changes ban-risk profile and re-enables anti-ban pacing; template-only content cannot fail back to a free-form Baileys send without a text rendering; a number registered on Cloud API generally cannot also be live on Baileys simultaneously — so failover is best across **different numbers/sessions** of the tenant, not the same number. Default is **no failover** (single mode per session) for predictability; failover is an explicit, audited tenant choice.
+
+### 2.7 Config & credentials (per tenant, per mode)
+
+Each mode carries its own config, stored **per tenant** in `channel_credentials`, **secret-redacted in UI/logs** and **envelope-encrypted at rest** via the existing `FieldCipher` (per-tenant KMS-wrapped DEK, consistent with §Security). Never exposed to other tenants; platform-level BSP master keys (if any) live in `platform_settings` (secret).
+
+| Mode | Required config | Secret fields (encrypted) |
+|---|---|---|
+| `BAILEYS` | bridge base URL, QR/pairing (interactive) | bridge shared token / HMAC secret |
+| `CLOUD_API` | WABA id, phone-number id, API version | system-user **access token**, webhook **verify token**, app secret |
+| `ON_PREMISE` | on-prem base URL, phone number | client API user/password/token, webhook secret |
+| `BSP_GATEWAY` | provider (enum), endpoint/base URL, sender id/number | provider **api key/secret**, webhook signing secret |
+
+### 2.8 Decision / trade-off table (which mode when)
+
+| Mode | Chosen for | Rejected/avoid when | Rationale (ban-risk vs features vs rules) |
+|---|---|---|---|
+| `BAILEYS` **(default)** | Full feature set (groups, channels, extraction, tagging, welcome); no official onboarding; SMB / community | High-volume cold outreach; ban-averse brands; regulated senders | **Full features, highest ban risk** → anti-ban engine **mandatory**; zero-setup default keeps the MySQL-only/Baileys promise |
+| `CLOUD_API` | Official deliverability, brand safety, notifications/OTP/template campaigns, verified business | Group management, member extraction, scraping (unsupported) | **Lowest ban risk, stricter rules** (templates + 24h window, per-conversation pricing); no groups/extraction → those ops `ModeCapabilityException` |
+| `ON_PREMISE` | Tenants already running the legacy self-hosted API; data-locality needs | New deployments (Meta deprecated it) | Official but **deprecated** → documented **migration to Cloud API**; self-hosted operational burden |
+| `BSP_GATEWAY` | Official reach without direct WABA ops, per-region partner, existing Twilio/360dialog/etc. contract | Needing groups/extraction; providers lacking a needed capability | Official via partner, **low ban risk**, provider-specific capability + pricing; one driver, many providers |
+
+**Compliance/ban-risk summary:** official modes (`CLOUD_API`, `BSP_GATEWAY`) trade features (no groups/extraction) and free-form freedom (template + 24h window) for **low ban risk, higher deliverability, and Meta-sanctioned scale**; unofficial `BAILEYS` (and self-hosted `ON_PREMISE`'s web-adjacent surface) trade ban risk for **full features** — so anti-ban is **mandatory and non-bypassable** there (Req A4, unchanged).
+
+---
+
+## WhatsApp Groups — Full Management Design (Deep Dive)
+
+> **Completeness note.** Requirement **A5** and the reused single-tenant `GroupService` are itemized here to **full, production-ready** completeness — every group lifecycle operation, with its `GroupService` method, the data models it touches, the capability it requires, and the exact WA status-code mapping. No group operation is a stub. All operations are **tenant-scoped** (`BelongsToTenant`), **capability-gated** (`Groups` capability → Baileys-only; official modes reject with `ModeCapabilityException`, Property 21), and **admin-guarded before any bridge call** (Req A5.2, Property 25 below).
+
+### G.1 `GroupService` interface (PHP)
+
+```php
+namespace App\Services\Groups;
+
+interface GroupService
+{
+    // ---- Lifecycle & metadata ----
+    public function create(Session $s, string $subject, array $participants = []): GroupRef;
+    public function delete(Session $s, GroupRef $g): void;                       // leave + tombstone
+    public function updateMetadata(Session $s, GroupRef $g, GroupMetadata $meta): void; // name/description/icon
+
+    // ---- Invite links ----
+    public function inviteLink(Session $s, GroupRef $g): InviteLink;             // get current
+    public function revokeInviteLink(Session $s, GroupRef $g): InviteLink;       // rotate -> new code
+    public function joinViaLink(Session $s, string $code): JoinResult;
+
+    // ---- Admin management (returns per-target WA status) ----
+    public function addParticipants(Session $s, GroupRef $g, array $jids): ParticipantOpResult;   // ADDED|INVITE_SENT|ALREADY_MEMBER|FAILED
+    public function removeParticipants(Session $s, GroupRef $g, array $jids): ParticipantOpResult;
+    public function promote(Session $s, GroupRef $g, array $jids): ParticipantOpResult;
+    public function demote(Session $s, GroupRef $g, array $jids): ParticipantOpResult;
+
+    // ---- Settings (audited) ----
+    public function setSettings(Session $s, GroupRef $g, GroupSettings $settings): void; // announcement/locked/ephemeral/approval
+
+    // ---- Join-request inbox + auto-approve rules ----
+    public function pendingJoinRequests(Session $s, GroupRef $g): array;         // JoinRequest[]
+    public function resolveJoinRequest(Session $s, GroupRef $g, string $jid, JoinDecision $d): void; // approve|reject
+    public function evaluateAutoApprove(Session $s, GroupRef $g, JoinRequest $r): JoinDecision;       // ordered rules
+
+    // ---- Reconciliation & bulk ----
+    public function reconcileMembers(Session $s, GroupRef $g): ReconcileReport;  // bridge truth -> DB
+    public function bulkAddParticipants(Session $s, GroupRef $g, iterable $jids, int $chunk = 50): BatchRef; // chunked jobs
+
+    // ---- Welcome ----
+    public function sendWelcome(Session $s, GroupRef $g, array $newMembers): void; // per-member|combined, media, dynamic card w/ text fallback, duplicate-guard
+
+    // ---- Extraction & export ----
+    public function extractMembers(Session $s, GroupRef $g, ExtractOptions $o): \Generator; // generator, temp-table de-dup, active-filter
+    public function export(Session $s, GroupRef $g, ExportFormat $fmt): SignedUrl;
+
+    // ---- Tagging ----
+    public function tagAll(Session $s, GroupRef $g, TagOptions $o): TagResult;    // hidden mentions, 200/chunk, cooldown, admin-only
+    public function tagSelective(Session $s, GroupRef $g, array $jids, TagOptions $o): TagResult;
+}
+
+interface GroupAdminGuard {
+    /** Throws NotGroupAdminException BEFORE any bridge mutation (Req A5.2, Property 25). */
+    public function assertBotIsAdmin(Session $s, GroupRef $g): void;
+    public function botIsAdmin(Session $s, GroupRef $g): bool;   // cached from last reconcile
+}
+```
+
+Every admin-requiring method calls `GroupAdminGuard::assertBotIsAdmin` (and `ChannelRouter::assertSupported($s, Groups)`) **first**, so an op is rejected **before** any bridge call when the bot is not an admin or the session's mode is official (Property 21 + Property 25).
+
+### G.2 Participant op — WA status-code mapping
+
+`addParticipants`/`removeParticipants`/`promote`/`demote` return a `ParticipantOpResult` mapping each target JID to a normalized status derived from the WhatsApp participant-action response codes:
+
+| Normalized status | Meaning | Typical WA code |
+|---|---|---|
+| `ADDED` | Added directly to the group | 200 |
+| `INVITE_SENT` | Privacy settings blocked direct add; invite link sent instead | 403 / 409 (privacy) |
+| `ALREADY_MEMBER` | Target already in the group | 409 (present) |
+| `FAILED` | Not on WhatsApp / bad JID / other error | 404 / 500 |
+
+The mapping is deterministic and unit-tested; the UI shows a per-target result table so a bulk add never fails opaquely.
+
+### G.3 Settings control (audited)
+
+`setSettings` toggles are written to the group and **audited** (`audit_logs`, hash-chained): **announcement** (only admins post), **locked** (only admins edit metadata), **ephemeral** (disappearing-message timer), **approval mode** (membership approval on/off). Each toggle requires bot-admin and records `{group, field, from, to, actor}`.
+
+### G.4 Join-request inbox + ordered auto-approve rules
+
+Pending join requests populate a tenant inbox (`pendingJoinRequests`). Auto-approval evaluates rules in a **fixed, first-decisive order** so behavior is predictable (mirrors the resolution-pipeline pattern):
+
+1. **Blocklist** — if the requester is on the tenant/global blocklist → **reject** (short-circuit, highest priority).
+2. **Country code** — allow/deny by configured country-code allow/deny lists.
+3. **Regex** — match the requester's number/name against tenant regex rules.
+4. **Manual** — no rule decisive → leave **pending** for a human in the inbox.
+
+```pascal
+ALGORITHM evaluateAutoApprove(request)
+BEGIN
+    IF blocklist.contains(request.jid) THEN RETURN REJECT END IF       // rule 1 (wins)
+    IF countryRule.decisive(request.cc) THEN RETURN countryRule.decision END IF  // rule 2
+    IF regexRule.matches(request) THEN RETURN regexRule.decision END IF          // rule 3
+    RETURN PENDING                                                      // rule 4: manual
+END
+```
+
+### G.5 Auto-welcome (exactly once per join)
+
+`sendWelcome` supports **per-member** vs **combined** welcome, **media welcome**, and a **dynamic card** (rich message) with **text fallback** when the session/mode can't render the card (degradation table, §Advanced Chatbot). A **duplicate-guard** ensures the welcome is sent **exactly once per join** even on rejoin spam (Req A5.3): a `(group_id, jid, join_epoch)` guard row is inserted transactionally before send; a rejoin with the same epoch is a no-op. **Welcome template rotation / A-B** picks the next template variant (sticky via `AbTester` when A/B is enabled) so repeated welcomes vary. Covered by **Correctness Property 25** (welcome exactly once) — see updated properties.
+
+### G.6 Number extraction, reconciliation, bulk & export
+
+- **Extraction** (`extractMembers`) is **generator-based** (streams members, never loads the whole group into memory), de-dups through a **temp table** keyed by normalized JID, and applies **active-number filtering** (only numbers currently on WhatsApp). Requires the `Extraction` capability (Baileys) and bot-admin.
+- **Reconciliation** (`reconcileMembers`) pulls the bridge's ground-truth participant list and updates the DB (adds/removes), caching bot-admin status for the guard.
+- **Bulk participant jobs** (`bulkAddParticipants`) split the target list into **chunked** queued jobs (default 50/chunk) so a large add is retry-safe and rate-paced by anti-ban.
+- **Export** streams to CSV/TXT/JSON/XLSX/vCard under the tenant storage prefix, served via a **signed expiring URL** (A6.3, §Base URL).
+
+### G.7 Tag-all / selective / custom tagging
+
+`tagAll`/`tagSelective` send **hidden mentions** (mention JIDs without visible @text where supported), **split into 200-mentions-per-chunk** messages (WA mention cap), apply a **per-group cooldown** (anti-spam, reuses anti-ban), and are **admin-only guarded**. Custom tagging accepts an arbitrary JID subset + message template.
+
+### G.8 Group lifecycle (diagram)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: create(subject, participants)
+    Created --> Active: bot promoted / reconcile
+    Active --> Active: metadata / settings / add-remove / promote-demote (admin-guarded)
+    Active --> Active: join-request -> auto-approve rules -> welcome (once/join)
+    Active --> Active: extract / export / tag-all (capability + admin gated)
+    Active --> Deleted: delete (leave + tombstone)
+    Deleted --> [*]
+```
+
+**Capability & guard summary:** all group ops require `Groups` capability (Baileys; official modes → `ModeCapabilityException` before dispatch) **and** bot-admin (`assertBotIsAdmin` before any bridge mutation). Extraction/tagging additionally require `Extraction`/`Tagging` capabilities. Data models touched: reused `groups`, `group_members`, `group_settings`, `welcome_*`, `opt_outs`, plus tenant-prefixed export files.
+
+---
+
+## WhatsApp Channels — Full Management Design (Deep Dive)
+
+> **Completeness note.** Requirement **A6** (channels/newsletters) is itemized here to **full, production-ready** completeness across the applicable channel modes. Channels/newsletters are a **Baileys-only** capability (`Channels` capability); on official modes (`CLOUD_API`/`ON_PREMISE`/`BSP_GATEWAY`) every channel op is rejected with a typed `ModeCapabilityException` **before** any driver call (Property 21) — never a crash, never a silent no-op. All ops are tenant-scoped.
+
+### CH.1 `ChannelService` interface (PHP)
+
+```php
+namespace App\Services\Channels;
+
+interface ChannelService
+{
+    // ---- Lifecycle & metadata ----
+    public function create(Session $s, string $name, ?string $description = null): ChannelRef; // newsletter
+    public function delete(Session $s, ChannelRef $c): void;
+    public function updateMetadata(Session $s, ChannelRef $c, ChannelMetadata $m): void; // name/description/picture
+
+    // ---- Subscriber / member management ----
+    public function subscribers(Session $s, ChannelRef $c): \Generator;          // streamed
+    public function addAdmin(Session $s, ChannelRef $c, string $jid): void;
+    public function removeAdmin(Session $s, ChannelRef $c, string $jid): void;
+    public function follow(Session $s, ChannelRef $c): void;
+    public function mute(Session $s, ChannelRef $c, bool $muted): void;
+
+    // ---- Posting ----
+    public function post(Session $s, ChannelRef $c, ChannelPost $p): PostRef;     // text/media/poll
+    public function schedulePost(Session $s, ChannelRef $c, ChannelPost $p, Schedule $when): PostRef; // once + recurring
+    public function calendar(Session $s, ChannelRef $c, DateRange $r): array;     // content calendar
+
+    // ---- Analytics ----
+    public function analytics(Session $s, ChannelRef $c, DateRange $r): ChannelAnalytics; // subscribers/reach/engagement, delta-from-snapshots
+}
+```
+
+Every method calls `ChannelRouter::assertSupported($s, Channels)` first; an official-mode session throws `ModeCapabilityException` before any bridge call.
+
+### CH.2 Posting & content
+
+- **Post types:** `text`, `media` (image/doc/audio/video), `poll`. Rich types degrade per the §Advanced Chatbot degradation table when the session can't render them.
+- **Scheduled + recurring posts** use the same `Scheduler` (`cron-expression`) as messaging; a **content calendar** view (`calendar`) shows scheduled + published posts over a date range.
+- Posts flow through the anti-ban gate (Baileys is a web-protocol mode → `requiresAntiBan()=true`), so channel broadcasts are paced.
+
+### CH.3 Analytics (delta-from-snapshots)
+
+`analytics` reports **subscribers, reach, and engagement**. Because WhatsApp exposes point-in-time counters, the platform stores periodic **snapshots** and computes **deltas** (growth, reach change, engagement rate) between snapshots — never trusting a single instantaneous read. Rolled into `metrics_rollup` for the User Panel reports.
+
+### CH.4 Capability gating per ChannelMode
+
+| Channel capability | `BAILEYS` | `CLOUD_API` | `ON_PREMISE` | `BSP_GATEWAY` |
+|---|:---:|:---:|:---:|:---:|
+| Create / delete channel | ✅ | ❌ | ❌ | ❌ |
+| Edit metadata (name/desc/picture) | ✅ | ❌ | ❌ | ❌ |
+| Subscriber / admin management | ✅ | ❌ | ❌ | ❌ |
+| Auto post (text/media/poll) | ✅ | ❌ | ❌ | ❌ |
+| Scheduled / recurring posts + calendar | ✅ | ❌ | ❌ | ❌ |
+| Analytics (subscribers/reach/engagement) | ✅ | ❌ | ❌ | ❌ |
+
+`❌` = `ModeCapabilityException` before any driver call. This is consistent with the master capability matrix in §Channel Mode 2.3 (Channels/newsletters = Baileys-only).
+
+### CH.5 Channel post flow (diagram)
+
+```mermaid
+sequenceDiagram
+    participant U as User Panel
+    participant CS as ChannelService
+    participant CR as ChannelRouter
+    participant AB as AntiBanEngine
+    participant BR as Baileys Bridge
+    U->>CS: post(session, channel, content)
+    CS->>CR: assertSupported(session, Channels)
+    alt official mode
+        CR-->>CS: ModeCapabilityException (before any bridge call)
+        CS-->>U: typed error (never crash)
+    else BAILEYS
+        CS->>AB: gate(post)  %% paced
+        AB-->>CS: allow / defer
+        CS->>BR: publish post
+        BR-->>CS: PostRef
+        CS-->>U: PostRef + calendar update
+    end
+```
+
+**Data models touched:** reused `channels`/`newsletters`, `channel_posts`, `channel_snapshots` (for delta analytics), plus `channel_send_log` (per-post capability-block audit). Errors: `ModeCapabilityException` (unsupported mode), `NotChannelAdminException` (admin-requiring op without admin), both typed and non-crashing.
+
+---
+
+## Base URL / APP_URL Configuration (Deep Dive)
+
+> **Net-new configuration surface.** A single **configurable Base URL** (deployment domain, e.g. `bot.getxtrra.in`) is the canonical origin from which every absolute URL the platform emits is built. This introduces a **new requirement on regeneration: Requirement A9 — Base URL / deployment domain configuration** (see §New Requirements). It underpins webhook registration (A8, B1), signed export/payment URLs (A6.3, B6.4), per-tenant subdomain routing (A1), and OAuth/OTP redirects (C1).
+
+### U.1 What the Base URL drives
+
+| Consumer | How the Base URL is used |
+|---|---|
+| API & panels | Absolute links in API responses, emails, and Livewire redirects are built from the canonical base, not the request `Host` header |
+| **Webhook callback registration** | The callback URL registered with the WA Bridge, **Meta Cloud API**, **On-Premise**, and **BSP** providers (per `ChannelMode`), and with **payment gateways** (Razorpay/Stripe/UPI), is `{baseUrl}/webhooks/...` |
+| **Signed / expiring URLs** | Export download links and payment links are **signed** against the canonical host so the signature is host-stable and tamper-evident (A6.3, B6.4) |
+| **Per-tenant subdomain routing** | `tenant.{slug}.{subdomain}` (e.g. `acme.app.bot.getxtrra.in`) resolves the tenant; the base host defines the apex the subdomain hangs off |
+| OAuth / OTP redirects | Redirect/callback URIs for social login and OTP verification are built from the base so they match registered allowlists |
+
+### U.2 Where it is stored & precedence
+
+- **`config/app.php` `APP_URL` (env `APP_URL`)** — the deployment default, single source of truth in code.
+- **`platform_settings['base_url']`** — an admin-editable **override** (Admin Panel → System settings) that takes precedence over env at runtime, so ops can change the domain without a redeploy (cache-invalidated on save).
+- **Per-tenant custom domain (optional)** — a tenant may map a `custom_domain` (verified via DNS/ACME); when present, that tenant's absolute/subdomain URLs and webhook callbacks use the custom domain instead of the platform apex.
+
+**Precedence:** per-tenant `custom_domain` → `platform_settings['base_url']` → `config('app.url')`.
+
+### U.3 `UrlBuilder` / `BaseUrl` helper (PHP)
+
+```php
+namespace App\Services\Url;
+
+interface BaseUrl
+{
+    /** The canonical platform base (never derived from the request Host header). */
+    public function platform(): string;
+    /** The base for a specific tenant (custom domain → subdomain → platform apex). */
+    public function forTenant(Tenant $t): string;
+}
+
+interface UrlBuilder
+{
+    public function absolute(string $path, ?Tenant $t = null): string;
+    /** Webhook callback URL registered with a provider for a session's channel mode. */
+    public function webhook(string $provider, Session $s): string;      // {base}/webhooks/{provider}/{routeKey}
+    /** Signed, expiring URL for exports / payment links, signed against the canonical host. */
+    public function signed(string $path, \DateTimeInterface $expiresAt, ?Tenant $t = null): string;
+    public function tenantSubdomain(Tenant $t): string;                 // tenant.{slug}.{apex}
+}
+```
+
+### U.4 Flow into webhook registration & signed URLs
+
+- **Webhook registration:** when a session is created/registered (`ChannelDriver::register`), the driver registers `UrlBuilder::webhook($provider, $session)` with the provider (Meta callback URL + verify token, BSP callback, bridge HMAC endpoint). The `route_key` is stored in `channel_webhook_routes` so inbound webhooks map back to `(tenant, session, driver)` (§Channel Mode 2.5).
+- **Signed URLs:** `UrlBuilder::signed(...)` signs the path + expiry against the **canonical host**, so a link works regardless of which node served it and the signature can't be replayed against a different host.
+
+### U.5 Security consideration (canonical host, no host-header injection)
+
+The Base URL is **never** derived from the incoming `Host`/`X-Forwarded-Host` header for URL generation (Laravel `TrustProxies` / `TrustHosts` restricts accepted hosts). Building absolute/webhook/signed URLs from the request host would allow **host-header injection** (poisoned password-reset links, cache poisoning, webhook redirection). Instead:
+
+- Absolute/webhook/signed URLs are built **only** from the configured canonical base (`BaseUrl::platform()`/`forTenant()`).
+- Accepted request hosts are allowlisted (platform apex + verified tenant subdomains/custom domains); an unrecognized host is rejected.
+- Signed URLs bind the canonical host into the signature so a valid signature can't be transplanted to another host.
+
+Covered by **Correctness Property 27** (canonical-host URL generation) — see updated properties.
+
+---
+
+## Definition of Done / Completeness Guarantees
+
+> **Purpose.** This section makes the platform's "100% working condition" explicit: **every** feature listed in this design ships **fully implemented** — no stubs, no mocks, no TODOs in production code paths. `Fake*` doubles (`FakeBridgeClient`, `FakeChannelDriver`, `FakeLlmProvider`, `FakeGateway`, `FakeVectorStore`, `FakeEmbedder`, `FakeStt`, `FakeKms`) exist **only** in the test suite and are bound solely in the testing container — never in production.
+
+### DoD.1 Per-feature completeness checklist
+
+A feature (User Panel item, Admin Panel item, channel capability, group capability, or channel mode) is **Done** only when **all** of the following hold:
+
+1. **Fully implemented** — real service + real driver/gateway/provider behind its interface; no placeholder returning canned data in production.
+2. **Tested** — unit + feature tests, and a **property-based test** where a universal property applies (Properties 1–28); test lists the property number it validates.
+3. **Error-handled** — every failure path maps to a typed exception in the `AppException` hierarchy with a defined HTTP/retry disposition (see §Error Handling); no unhandled crash.
+4. **Tenant-scoped** — reads/writes are structurally confined to the tenant (`BelongsToTenant`), verified by the isolation property (Property 1) / retrieval isolation (Property 20).
+5. **Plan-gated & quota-metered** — access via `PlanGate`, consumption via `QuotaGuard`; over-limit **defers/blocks with explanation**, never silently drops (NFR2.1).
+6. **Capability-aware** — an op unsupported by the session's `channel_mode` is rejected with `ModeCapabilityException` **before** dispatch (Property 21), rendered as disabled-with-reason in the UI.
+7. **Observable** — emits `trace_id`-tagged structured logs (phone-redacted, no message bodies) and `wacb_*` metrics; surfaced in the relevant dashboard.
+
+### DoD.2 No-stub guarantee (production paths)
+
+- Production service-container bindings resolve **only** concrete implementations (`HttpBridgeClient`/`BaileysChannelDriver`, `OpenAiProvider`/`GeminiProvider`, `RazorpayGateway`/`StripeGateway`/`UpiLinkGateway`, real `ChannelService`/`GroupService`/`UrlBuilder`, etc.). Optional/scale-up dependencies that are absent **degrade gracefully** to a real MySQL/Baileys default (see §Dependencies degradation table) — degradation is a *real, tested code path*, not a stub.
+- A CI check asserts no `Fake*`/`Stub*` class is referenced from a non-test namespace and no `throw new NotImplementedException` / `// TODO` remains in `app/`.
+
+### DoD.3 Coverage / traceability
+
+Because the Design-First workflow regenerates `requirements.md` and `tasks.md` from this design, completeness is **traceable**: every one of the **28 User Panel features** (§4.1, C1–C6), **28 Admin Panel features** (§4.2, D1–D6), each **channel-management capability** (§Channels Full Mgmt, A6), each **group-management capability** (§Groups Full Mgmt, A5), and each **`ChannelMode`** (§Channel Mode, A8) maps to at least one task in `tasks.md` on regeneration, and each such task references its requirement clause and the correctness property (if any) it validates. The regenerated `tasks.md` MUST contain a task for every row of the §4.1 and §4.2 tables, every `GroupService`/`ChannelService` method, every `ChannelMode`, and the `BaseUrl`/`UrlBuilder` helper — so the mapping is 1:1 and auditable.
+
+---
+
 ## Data Architecture & Analytics (Deep Dive)
 
 > Extends B7 / D4. Regeneration adds criteria for event sourcing (B7.8), analytics pipeline (D4.6), conversation search (B7.9), and reporting model (D4.7).
@@ -1795,6 +2559,7 @@ Funnels, cohort/retention, revenue, **bot deflection rate** (resolved-without-hu
 
 - **Reused:** Laravel 11, PHP 8.3, MySQL 8, Livewire 3, Alpine, Tailwind, Supervisor, nginx + PHP-FPM, Node + Baileys bridge, Sanctum, `maatwebsite/excel`, Intervention Image, `dragonmantank/cron-expression`.
 - **New (core):** an LLM SDK/HTTP client for OpenAI + Gemini (behind `LlmProvider`), payment gateway SDKs (Razorpay/Stripe) behind `PaymentGateway`, a PDF generator for invoices (e.g. `barryvdh/laravel-dompdf`).
+- **Channel Mode backends (all behind the `ChannelDriver` interface):** the existing **Node + Baileys bridge** is the default driver (`BAILEYS`, reused, no new dependency). Additional selectable backends are **opt-in per tenant** and each degrades to the Baileys default when its credentials are absent: **Meta WhatsApp Cloud API** (`CLOUD_API`, HTTP to `graph.facebook.com` — WABA id, phone-number id, access token, verify token), the legacy **WhatsApp Business/On-Premise API** (`ON_PREMISE`, self-hosted client container — **deprecated by Meta, migration path to Cloud API**), and **third-party BSP/gateway SDKs/HTTP** (`BSP_GATEWAY`: Twilio, 360dialog, Gupshup, Vonage, MessageBird, Infobip, WATI, Kaleyra — provider api key/endpoint). Per-mode secrets are envelope-encrypted via `FieldCipher`.
 - **New (optional / scale-up — each MUST degrade gracefully when absent):**
 
 | Dependency | Purpose | Fallback when absent (MySQL-only default still works) |
@@ -1808,8 +2573,11 @@ Funnels, cohort/retention, revenue, **bot deflection rate** (resolved-without-hu
 | Warehouse / analytics replica | historical reporting | MySQL read replica or `metrics_rollup` on primary |
 | OTLP collector (Prometheus/tracing) | metrics + distributed traces | `/metrics` scrape + MySQL `traces` ring-buffer |
 | Second LLM provider | fallback chain | local heuristic (FAQ/templated) after primary breaker opens |
+| Meta Cloud API (`CloudApiChannelDriver`) | official low-ban-risk messaging mode | mode unavailable; tenant stays on `BAILEYS` default (zero official-API setup) |
+| On-Premise API container (`OnPremiseChannelDriver`) | legacy official self-hosted mode | mode unavailable; **deprecated** → steer to Cloud API / Baileys |
+| BSP/gateway SDKs (`BspGatewayChannelDriver`: Twilio/360dialog/Gupshup/…) | official partner messaging mode | mode/provider unavailable; tenant stays on `BAILEYS` default |
 
-Every optional dependency sits behind an interface (`VectorStore`, `Embedder`, `FieldCipher`, `SpeechToText`, `Tracer`, `LlmProvider`, ...) so it is swappable and its absence is a config flip, never a rewrite.
+Every optional dependency sits behind an interface (`ChannelDriver`, `VectorStore`, `Embedder`, `FieldCipher`, `SpeechToText`, `Tracer`, `LlmProvider`, ...) so it is swappable and its absence is a config flip, never a rewrite.
 
 ---
 
@@ -1837,6 +2605,8 @@ Every optional dependency sits behind an interface (`VectorStore`, `Embedder`, `
 | 18 | Scoped event sourcing (conversation/order/session only) + projections | Event-log storage + projector code; in exchange, audit/replay/analytics where it matters, without event-sourcing tax on config CRUD |
 | 19 | Time-based RANGE partitioning now, tenant sharding later | Partition management; in exchange, cheap retention + a clear horizontal-scale path |
 | 20 | Expand-contract migrations + blue-green + feature flags | Multi-step migrations; in exchange, zero-downtime deploys and always-safe rollback |
+| 21 | **Channel Mode**: pluggable per-session messaging backend (`ChannelDriver` generalizes `BridgeClient`), Baileys as default driver + Cloud API / On-Premise / BSP as opt-in modes | Per-mode capability differences + credential/config surface + a routing/failover layer; in exchange, one interface for all WhatsApp backends, tenant choice of ban-risk-vs-features, and **zero official-API setup by default** (Baileys) — a new backend is a class + enum case, never a rewrite |
+| 22 | Capability-gate every mode (`supports()` → `ModeCapabilityException`) and branch anti-ban by mode (web-protocol vs official) | Extra capability handshake + a mode-aware send gate (Algorithm 9); in exchange, unsupported ops fail cleanly (never crash), official modes follow provider template/window rules, and Baileys/on-prem keep the non-bypassable anti-ban guarantee |
 
 ---
 
@@ -1848,6 +2618,13 @@ This design upgrade deepens existing behaviour and introduces net-new subsystems
 
 | Area | Suggested requirement | Deepens / relates to |
 |---|---|---|
+| **Channel Mode** | **A8 — Channel Mode / pluggable messaging backends.** THE system SHALL support a per-tenant, per-session selectable `channel_mode` (`BAILEYS` default, `CLOUD_API`, `ON_PREMISE`, `BSP_GATEWAY`) behind one `ChannelDriver` interface, with sub-criteria: **A8.1** each session declares exactly one mode; **A8.2** an operation unsupported by a session's mode SHALL be rejected with `ModeCapabilityException` before dispatch (never a crash); **A8.3** an outbound message SHALL route to exactly the driver of its session's `channel_mode`, and inbound webhooks parse via that driver; **A8.4** each mode's credentials/config SHALL be stored per tenant, secret-redacted and envelope-encrypted; **A8.5** anti-ban warm-up/rate SHALL apply iff the mode is a web-protocol mode (Baileys/On-Premise), while official modes (Cloud API/BSP) enforce template/24h-window/provider-rate rules; **A8.6** On-Premise is deprecated with a documented migration path to Cloud API; **A8.7** optional per-tenant multi-mode failover (e.g. Cloud API→Baileys) SHALL reuse the circuit-breaker machinery. | A2 (sessions), A3 (Alg 3/9 send gate), A4 (anti-ban), A5/A6 (capability-gated groups/extraction/channels), B1 (inbound routing), NFR3 (secrets), NFR4 (interface) — Props 21–24 |
+| **Base URL** | **A9 — Base URL / deployment domain configuration.** THE system SHALL build every absolute link, webhook callback, signed/expiring URL, and OAuth/OTP redirect from a configurable canonical base (`APP_URL` + `platform_settings` override + optional per-tenant custom domain), with sub-criteria: **A9.1** URLs SHALL be generated from the canonical base, never the request `Host` header; **A9.2** webhook callbacks registered with the Bridge/Cloud API/On-Premise/BSP/payment gateways SHALL use the canonical base per `ChannelMode`; **A9.3** per-tenant subdomain (`tenant.slug.subdomain`) and optional verified custom domain SHALL resolve the tenant; **A9.4** accepted request hosts SHALL be allowlisted and signed URLs SHALL bind the canonical host (no host-header injection). | A1 (subdomain routing), A6.3/B6.4 (signed/payment URLs), A8/B1 (webhook registration), C1 (OAuth/OTP), NFR3.2 — Property 27 |
+| **Full User Panel** | **C1–C6 completed & itemized** — all **28** tenant self-service features designed with component/route/service/tenant-scope/plan-gate/degradation (§4.1); each maps to a task. | C1–C6 (Property 1, 28) |
+| **Full Admin Panel** | **D1–D6 completed & itemized** — all **28** super-admin features designed with component/route/service/platform-admin-guard/audit (§4.2); each maps to a task. | D1–D6 (Property 1, 17, 28) |
+| **Full Group mgmt** | **A5 completed** — full lifecycle: create/delete/metadata, invite link get/revoke/join, admin mgmt with WA status-code mapping, settings (audited), join-request inbox + ordered auto-approve, reconciliation, chunked bulk jobs, welcome exactly-once + rotation/A-B, generator extraction + active filter, export, tag-all/selective (hidden mentions, 200/chunk, cooldown, admin-guard); `GroupService`/`GroupAdminGuard` interfaces. | A5 (Props 25, 26) |
+| **Full Channel mgmt** | **A6 (channels) completed** — full lifecycle: create/delete/metadata, subscriber/admin mgmt, follow/mute, text/media/poll auto-post, scheduled+recurring + content calendar, delta-from-snapshot analytics, capability-gated per `ChannelMode`; `ChannelService` interface. | A6 (Props 21, 26) |
+| **Definition of Done** | **DoD completeness guarantee** — every listed User/Admin/channel/group/mode feature ships fully implemented (no stubs/mocks in prod paths; `Fake*` in tests only), each with tests, error handling, tenant-scoping, plan-gating, capability-awareness, and observability; 1:1 feature→task traceability on regeneration. | C1–C6, D1–D6, A5, A6, A8, A9 (Property 28) |
 | RAG grounding | B4.5 — grounded answers with verifiable citations; ungrounded factual claims suppressed/escalated | B4.1 (Props 11, 20) |
 | Conversation memory | B4.6 — two-tier memory + token budgeting + compaction | B4.1 (Alg 5) |
 | Prompt guardrails / PII | NFR3.5 — PII redaction before LLM egress; jailbreak/injection defense | NFR3.2/3.3 (Prop 15) |
@@ -1869,7 +2646,7 @@ This design upgrade deepens existing behaviour and introduces net-new subsystems
 | Drip sequences | B6.6 — scheduled/re-engagement sequences (opt-out/quota respected) | B6 |
 | Deployment safety | NFR-ops — expand-contract migrations, blue-green, zero-downtime drain | — |
 
-**New tasks implied (to be added on `tasks.md` regeneration):** RAG ingestion pipeline + `VectorStore`/`Embedder`/`Retriever`; memory compactor; `PiiRedactor`/`Guardrail`; semantic cache + `ModelRouter`; `CircuitBreaker`/`Outbox`/`IdempotencyStore`/`SagaOrchestrator` + relay worker; `TierResolver`/`TenantLifecycle`/`FieldCipher` + KMS; `Tracer`/`Metrics` + `/metrics` + rollups + alerting; `AgentRouter`/`Skill`/`ToolRegistry`/`AbTester`; rich-message `OutboundContent` + degradation; `SpeechToText`/`TextToSpeech`; drip `campaign_sequences` engine; `event_log` + projectors + checkpoints + CDC/ETL + star-schema reporting. Each carries property-based tests for Properties 11–20 and the new `Fake*` doubles listed in Testing Strategy.
+**New tasks implied (to be added on `tasks.md` regeneration):** **Channel Mode** — `channel_mode` column on `sessions_wa` + `channel_credentials`/`cloud_api_templates`/`channel_webhook_routes`/`channel_send_log` migrations; `ChannelMode`/`ChannelCapability`/`BspProvider` enums; `ChannelDriver` interface generalizing `BridgeClient`; `BaileysChannelDriver` (wrap existing `HttpBridgeClient`), `CloudApiChannelDriver`, `OnPremiseChannelDriver`, `BspGatewayChannelDriver` (per-provider adapters) + `FakeChannelDriver`; `ChannelRouter` + `ChannelCredentialStore` (envelope-encrypted); extend Algorithm 3 send gate → Algorithm 9 (mode-aware anti-ban branch + capability gate); mode-aware inbound-webhook routing (Meta verify-token / BSP signature) + provider→session mapping; Cloud API/BSP template sync + 24h-window enforcement; optional multi-mode failover via `CircuitBreaker`; User/Admin panel mode selection + per-mode credential entry (secret-redacted) — carries property tests for Properties 21–24. RAG ingestion pipeline + `VectorStore`/`Embedder`/`Retriever`; memory compactor; `PiiRedactor`/`Guardrail`; semantic cache + `ModelRouter`; `CircuitBreaker`/`Outbox`/`IdempotencyStore`/`SagaOrchestrator` + relay worker; `TierResolver`/`TenantLifecycle`/`FieldCipher` + KMS; `Tracer`/`Metrics` + `/metrics` + rollups + alerting; `AgentRouter`/`Skill`/`ToolRegistry`/`AbTester`; rich-message `OutboundContent` + degradation; `SpeechToText`/`TextToSpeech`; drip `campaign_sequences` engine; `event_log` + projectors + checkpoints + CDC/ETL + star-schema reporting. Each carries property-based tests for Properties 11–20 and the new `Fake*` doubles listed in Testing Strategy. **Full User Panel (§4.1)** — a task per each of the 28 tenant features (component + route + service wiring + plan-gate/quota + degradation state) carrying tenant-scope tests (Property 1). **Full Admin Panel (§4.2)** — a task per each of the 28 super-admin features (component + route + platform-admin guard + IP allowlist + audit) carrying audit-integrity tests (Property 17). **Full Group mgmt (§Groups)** — `GroupService` + `GroupAdminGuard`; lifecycle/metadata, invite-link get/revoke/join, participant add/remove/promote/demote + WA status-code mapping, audited settings, join-request inbox + ordered auto-approve (blocklist→country→regex→manual), reconciliation, chunked bulk jobs, welcome exactly-once + rotation/A-B, generator extraction + temp-table de-dup + active filter, export, tag-all/selective (hidden mentions, 200/chunk, cooldown) — property tests for Properties 25, 26. **Full Channel mgmt (§Channels)** — `ChannelService`; create/delete/metadata, subscriber/admin mgmt, follow/mute, text/media/poll post, scheduled+recurring + calendar, delta-from-snapshot analytics + `channel_snapshots`, capability-gating — property test for Property 26. **Base URL (§Base URL)** — `BaseUrl`/`UrlBuilder` helpers, `platform_settings['base_url']` override + per-tenant `custom_domain`, `TrustHosts` allowlist, canonical-host signed/webhook URL generation, subdomain routing — property test for Property 27. **Definition of Done** — a CI completeness task (no `Fake*`/`Stub*`/`NotImplementedException`/`TODO` reachable from `app/`; 1:1 feature→task audit) — Property 28. Every §4.1/§4.2 row, every `GroupService`/`ChannelService` method, every `ChannelMode`, and the `BaseUrl`/`UrlBuilder` helper MUST have a corresponding task so coverage is complete and traceable.
 
 ---
 
