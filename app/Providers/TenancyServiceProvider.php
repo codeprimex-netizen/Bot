@@ -8,6 +8,7 @@ use App\Services\Tenancy\DatabaseTenantTokenRepository;
 use App\Services\Tenancy\RequestTenantContext;
 use App\Services\Tenancy\Resolvers\ChainTenantResolver;
 use App\Services\Tenancy\TenantContext;
+use App\Services\Tenancy\TenantOwnershipGuard;
 use App\Services\Tenancy\TenantResolver;
 use App\Services\Tenancy\TenantTokenRepository;
 use Illuminate\Contracts\Foundation\Application;
@@ -31,6 +32,11 @@ class TenancyServiceProvider extends ServiceProvider
         // for queue workers as well as requests.
         $this->app->singleton(RequestTenantContext::class);
         $this->app->alias(RequestTenantContext::class, TenantContext::class);
+
+        // The ownership guard shares the context's lifetime: its suspension frames
+        // (the sanctioned read bypasses) belong to one unit of work, exactly like the
+        // tenant they are compared against.
+        $this->app->singleton(TenantOwnershipGuard::class);
 
         $this->app->singleton(TenantTokenRepository::class, DatabaseTenantTokenRepository::class);
 

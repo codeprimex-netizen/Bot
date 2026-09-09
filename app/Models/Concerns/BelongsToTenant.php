@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace App\Models\Concerns;
 
 use App\Exceptions\Tenancy\MissingTenantContextException;
+use App\Models\Builders\TenantScopedBuilder;
 use App\Models\Scopes\TenantScope;
 use App\Models\Tenant;
 use App\Services\Tenancy\TenantContext;
-use Illuminate\Database\Eloquent\Builder;
+use App\Services\Tenancy\TenantOwnershipGuard;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -33,23 +34,22 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  *
  * - the `TenantScope` global scope (see that class for the fail-closed table);
  * - a `creating` hook that fills `tenant_id` from the context when the caller did
- *   not supply one, and refuses to write an unattributed row if it cannot;
+ *   not supply one, refuses to write an unattributed row if it cannot, and refuses
+ *   an explicit `tenant_id` that names a *different* tenant than the acting one;
  * - the `tenant()` relation;
+ * - the ownership checks of `GuardsTenantOwnership` — the second line of defence on
+ *   the seams a query scope cannot reach (instance writes, unscoped hydration,
+ *   find-by-id, route binding), all of them failing with
+ *   `CrossTenantAccessException` (403, Req 1.3 / A1);
  * - two explicit, greppable escape hatches — `withoutTenantScope()` and
  *   `forTenant()`. There is no implicit one.
- *
- * ## Deliberate non-goals
- *
- * Saving or deleting an *already-loaded* instance is not re-checked here (Eloquent
- * builds those queries without global scopes), and neither is loading a foreign
- * tenant's row by id through an unscoped parent. That ownership check is
- * defense-in-depth and belongs to `CrossTenantAccessException` (task 0.4) — this
- * trait deliberately leaves that seam rather than half-implementing it.
  *
  * @phpstan-require-extends Model
  */
 trait BelongsToTenant
 {
+    use GuardsTenantOwnership;
+
     /**
      * Booted once per model class by Eloquent's trait-boot convention.
      */
@@ -58,9 +58,15 @@ trait BelongsToTenant
         static::addGlobalScope(new TenantScope);
 
         static::creating(static function (Model $model): void {
-            if ($model->getAttribute(TenantScope::COLUMN) !== null) {
+            $named = $model->getAttribute(TenantScope::COLUMN);
+
+            if ($named !== null) {
                 // An explicit tenant_id wins: provisioning, imports, and platform
-                // writes all need to name the tenant they are writing for.
+                // writes all need to name the tenant they are writing for. What a
+                // caller may *not* do is name a tenant other than the one it is
+                // acting as — that is forgery, and it is denied (Req 1.3 / A1).
+                app(TenantOwnershipGuard::class)->assertAttributable($model, $named);
+
                 return;
             }
 
@@ -94,11 +100,20 @@ trait BelongsToTenant
      * Anything that already knows its tenant must use `forTenant()` or
      * `TenantContext::runFor()` instead.
      *
-     * @return Builder<static>
+     * Because the bypass is declared here, rows it returns are exempt from the
+     * *retrieval* ownership check — the caller has said, in reviewable code, that this
+     * read crosses tenants. Writing one of those rows is still denied
+     * (`GuardsTenantOwnership`), and removing the scope by hand rather than through
+     * this helper leaves the retrieval check armed.
+     *
+     * @return TenantScopedBuilder<static>
      */
-    public static function withoutTenantScope(): Builder
+    public static function withoutTenantScope(): TenantScopedBuilder
     {
-        return static::query()->withoutGlobalScope(TenantScope::class);
+        /** @var TenantScopedBuilder<static> $query */
+        $query = static::query()->withoutGlobalScope(TenantScope::class);
+
+        return $query->withSanctionedTenantBypass();
     }
 
     /**
@@ -108,9 +123,9 @@ trait BelongsToTenant
      * is still there, it is just stated by the caller (platform-admin drill-downs,
      * cross-tenant schedulers).
      *
-     * @return Builder<static>
+     * @return TenantScopedBuilder<static>
      */
-    public static function forTenant(Tenant|string $tenant): Builder
+    public static function forTenant(Tenant|string $tenant): TenantScopedBuilder
     {
         $query = static::withoutTenantScope();
 

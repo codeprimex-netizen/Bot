@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Enums\QuotaKind;
+use App\Exceptions\Tenancy\CrossTenantAccessException;
 use App\Exceptions\Tenancy\MissingTenantContextException;
 use App\Models\Tenant;
 use App\Models\TenantApiToken;
@@ -71,11 +72,17 @@ it('returns only the acting tenant rows on every read path, for either tenant', 
             ->and(TenantUsage::query()->exists())->toBeTrue()
             ->and(TenantApiToken::query()->count())->toBe(2)
             ->and(TenantApiToken::query()->pluck('tenant_id')->unique()->values()->all())->toBe([$acting->id])
-            // ...and the other tenant's rows are simply not there, by id or in bulk.
-            ->and(TenantUsage::query()->find($otherUsage->id))->toBeNull()
-            ->and(TenantApiToken::query()->find($otherToken->id))->toBeNull()
+            // ...and the other tenant's rows are simply not there in bulk...
             ->and(TenantUsage::query()->where('tenant_id', $other->id)->count())->toBe(0)
-            ->and(fn () => TenantUsage::query()->findOrFail($otherUsage->id))->toThrow(ModelNotFoundException::class);
+            // ...while naming one of them by id is denied outright rather than silently
+            // missing: the typed 403 of Req 1.3, covered on its own terms in
+            // CrossTenantAccessTest.
+            ->and(fn () => TenantUsage::query()->find($otherUsage->id))->toThrow(CrossTenantAccessException::class)
+            ->and(fn () => TenantApiToken::query()->find($otherToken->id))->toThrow(CrossTenantAccessException::class)
+            ->and(fn () => TenantUsage::query()->findOrFail($otherUsage->id))->toThrow(CrossTenantAccessException::class)
+            // An id that exists nowhere stays an ordinary miss.
+            ->and(TenantUsage::query()->find(9_999_999))->toBeNull()
+            ->and(fn () => TenantUsage::query()->findOrFail(9_999_999))->toThrow(ModelNotFoundException::class);
     }
 });
 
@@ -101,19 +108,21 @@ it('stamps the acting tenant on create', function (): void {
 });
 
 it('keeps an explicitly supplied tenant_id instead of overwriting it', function (): void {
-    // Provisioning, imports, and platform writes all have to name their tenant.
-    // Whether the *caller* was allowed to name that tenant is the ownership check
-    // of task 0.4, not this trait's job.
-    [$acme, $globex] = seedTwoTenants();
+    // Provisioning, imports, and platform writes all have to name their tenant — so an
+    // explicit tenant_id is honoured rather than overwritten, as long as it names the
+    // tenant the caller is acting as. Naming another one is forgery and is denied by
+    // the ownership guard (Req 1.3), covered in CrossTenantAccessTest.
+    [$acme] = seedTwoTenants();
     app(TenantContext::class)->set($acme);
 
     $usage = TenantUsage::create([
-        'tenant_id' => $globex->id,
+        'tenant_id' => $acme->id,
         'kind' => QuotaKind::Sessions,
         'period_key' => QuotaKind::GAUGE_PERIOD_KEY,
     ]);
 
-    expect($usage->tenant_id)->toBe($globex->id);
+    expect($usage->tenant_id)->toBe($acme->id)
+        ->and(TenantUsage::query()->whereKey($usage->id)->exists())->toBeTrue();
 });
 
 it('refuses to create a row that cannot be attributed to a tenant', function (): void {

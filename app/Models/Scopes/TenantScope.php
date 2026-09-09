@@ -34,8 +34,11 @@ use Illuminate\Database\Eloquent\Scope;
  * The scope constrains **reads and mass writes** (`update()`/`delete()` on a
  * builder). Saving or deleting an already-loaded instance goes through
  * `Model::newModelQuery()`, which Eloquent deliberately builds without global
- * scopes; guarding *which* instance a caller was allowed to load in the first
- * place is the defense-in-depth ownership check of task 0.4.
+ * scopes; those seams — plus find-by-id, route binding, and relations that drop the
+ * scope on purpose — are covered a second time by
+ * `App\Services\Tenancy\TenantOwnershipGuard`, which denies them with
+ * `CrossTenantAccessException` (403, Req 1.3 / A1). The guard is defense in depth,
+ * not a substitute: this scope stays the primary constraint.
  */
 final class TenantScope implements Scope
 {

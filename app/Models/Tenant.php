@@ -6,6 +6,7 @@ namespace App\Models;
 
 use App\Enums\TenantStatus;
 use App\Models\Scopes\TenantScope;
+use App\Services\Tenancy\TenantOwnershipGuard;
 use Database\Factories\TenantFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -20,6 +21,13 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  *
  * The tenant itself is deliberately *not* `BelongsToTenant` — it is the root of
  * the ownership tree, not a member of it.
+ *
+ * Being the root is exactly why every child relation below starts by asserting that
+ * the caller is allowed to hold *this* tenant (Req 1.3 / A1). A `Tenant` instance is
+ * reachable from unscoped places by design — resolution, provisioning, platform
+ * screens — and two of the relations drop `TenantScope` deliberately, so "which
+ * parent am I hanging off?" is the only constraint left on those reads. See
+ * `TenantOwnershipGuard::assertRelationAccessible()`.
  *
  * @property string $id
  * @property string $name
@@ -72,6 +80,8 @@ class Tenant extends Model
      */
     public function tenantUsers(): HasMany
     {
+        $this->assertRelationVisible('tenantUsers');
+
         return $this->hasMany(TenantUser::class);
     }
 
@@ -87,6 +97,8 @@ class Tenant extends Model
      */
     public function users(): BelongsToMany
     {
+        $this->assertRelationVisible('users');
+
         return $this->belongsToMany(User::class, 'tenant_users')
             ->using(TenantUser::class)
             ->withPivot(['id', 'role', 'invited_at', 'joined_at'])
@@ -101,13 +113,15 @@ class Tenant extends Model
      * ANDed on top of it. Without that, reading one tenant's counters from a
      * platform-admin screen, a console command, or a scheduler (none of which bind a
      * tenant) would fail closed even though the query names its tenant explicitly.
-     * Guarding *which* `Tenant` instance a caller is allowed to hold is the
-     * ownership check of task 0.4, not this relation's job.
+     * Which `Tenant` instance a caller is allowed to hold is guarded separately, by
+     * `assertRelationVisible()` below — so dropping the scope here costs no isolation.
      *
      * @return HasMany<TenantUsage, $this>
      */
     public function usage(): HasMany
     {
+        $this->assertRelationVisible('usage');
+
         $relation = $this->hasMany(TenantUsage::class);
         $relation->getQuery()->withoutGlobalScope(TenantScope::class);
 
@@ -124,6 +138,8 @@ class Tenant extends Model
      */
     public function apiTokens(): HasMany
     {
+        $this->assertRelationVisible('apiTokens');
+
         $relation = $this->hasMany(TenantApiToken::class);
         $relation->getQuery()->withoutGlobalScope(TenantScope::class);
 
@@ -144,5 +160,18 @@ class Tenant extends Model
     public function storagePrefix(): string
     {
         return trim((string) config('wa.tenancy.storage_prefix', 'tenants'), '/').'/'.$this->id;
+    }
+
+    /**
+     * Refuse to reach this tenant's children from code acting as a *different*
+     * tenant (Req 1.3 / A1) — a `CrossTenantAccessException`, 403.
+     *
+     * A no-op in platform mode (Req 1.5) and when no tenant is bound, which is what
+     * keeps provisioning, tenant resolution, console commands, schedulers, and the
+     * admin panel reading any tenant they legitimately hold.
+     */
+    private function assertRelationVisible(string $relation): void
+    {
+        app(TenantOwnershipGuard::class)->assertRelationAccessible($this, $relation);
     }
 }
