@@ -40,6 +40,27 @@ return [
     |--------------------------------------------------------------------------
     | Applied by TenantLifecycle::provision when the caller supplies no value.
     */
+    /*
+    |--------------------------------------------------------------------------
+    | Tenant-owned tables — the rule for every phase (Req 1.1, 1.2 / A1)
+    |--------------------------------------------------------------------------
+    | Row-level isolation only holds if it is applied *everywhere*, so adding a
+    | tenant-owned table is two mandatory steps and nothing else:
+    |
+    |   1. migration: `TenantSchema::tenantId($table, ['status', ...]);`
+    |      — adds the `tenant_id` ULID FK (cascade on delete) plus the index that
+    |        leads with `tenant_id`, in one call.
+    |   2. model: `use App\Models\Concerns\BelongsToTenant;`
+    |      — global scope on every read, `tenant_id` stamped on every create.
+    |
+    | Both halves are enforced by `TenantOwnedModelsGuardTest`, which walks the live
+    | schema: a table with a `tenant_id` column whose model lacks the trait, or that
+    | has no index leading with `tenant_id`, fails the suite. The only sanctioned
+    | bypasses are the audited `TenantContext::asPlatform()` and an explicit
+    | `Model::withoutTenantScope()` at a call site; an unresolved context fails
+    | closed with `MissingTenantContextException`.
+    */
+
     'tenancy' => [
         'default_timezone' => env('WA_TENANT_DEFAULT_TIMEZONE', 'UTC'),
         'default_locale' => env('WA_TENANT_DEFAULT_LOCALE', 'en'),

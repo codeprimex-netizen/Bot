@@ -7,6 +7,16 @@ use App\Models\Tenant;
 use App\Models\TenantUsage;
 use Illuminate\Database\QueryException;
 
+/*
+|--------------------------------------------------------------------------
+| tenant_usage schema and model invariants
+|--------------------------------------------------------------------------
+| These tests are about the counter itself — casts, buckets, unique constraint,
+| cascade — so they read rows across tenants and say so with the explicit
+| `withoutTenantScope()` hatch. The scope those reads step around is covered on its
+| own terms in `BelongsToTenantTest` (Correctness Property 1).
+*/
+
 it('stores a period-bucketed counter for a tenant', function (): void {
     $tenant = Tenant::factory()->create();
 
@@ -18,7 +28,7 @@ it('stores a period-bucketed counter for a tenant', function (): void {
         'limit' => 1000,
     ]);
 
-    $fresh = TenantUsage::query()->findOrFail($usage->id);
+    $fresh = TenantUsage::withoutTenantScope()->findOrFail($usage->id);
 
     expect($fresh->kind)->toBe(QuotaKind::MessagesMonthly)
         ->and($fresh->period_key)->toBe('2025-06')
@@ -38,7 +48,7 @@ it('round-trips every QuotaKind value through the database', function (): void {
         $stored = DB::table('tenant_usage')->where('id', $usage->id)->value('kind');
 
         expect($stored)->toBe($case->value)
-            ->and(TenantUsage::query()->findOrFail($usage->id)->kind)->toBe($case);
+            ->and(TenantUsage::withoutTenantScope()->findOrFail($usage->id)->kind)->toBe($case);
     }
 });
 
@@ -86,7 +96,7 @@ it('keeps separate buckets per period, per kind and per tenant', function (): vo
         'period_key' => '2025-06-14',
     ]);
 
-    expect(TenantUsage::query()->count())->toBe(4)
+    expect(TenantUsage::withoutTenantScope()->count())->toBe(4)
         ->and($acme->usage)->toHaveCount(3)
         ->and($globex->usage)->toHaveCount(1);
 });
@@ -126,13 +136,13 @@ it('reports an exhausted bucket and never a negative remainder', function (): vo
 it('defaults a fresh counter to zero used', function (): void {
     $tenant = Tenant::factory()->create();
 
-    TenantUsage::query()->insert([
+    TenantUsage::withoutTenantScope()->insert([
         'tenant_id' => $tenant->id,
         'kind' => QuotaKind::Contacts->value,
         'period_key' => QuotaKind::GAUGE_PERIOD_KEY,
     ]);
 
-    $usage = TenantUsage::query()->where('tenant_id', $tenant->id)->sole();
+    $usage = TenantUsage::forTenant($tenant)->sole();
 
     expect($usage->used)->toBe(0)
         ->and($usage->limit)->toBe(0);
@@ -144,5 +154,5 @@ it('removes usage counters when the tenant is deleted', function (): void {
 
     $tenant->delete();
 
-    expect(TenantUsage::query()->where('tenant_id', $tenant->id)->exists())->toBeFalse();
+    expect(TenantUsage::forTenant($tenant)->exists())->toBeFalse();
 });

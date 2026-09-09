@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\QuotaKind;
+use App\Models\Concerns\BelongsToTenant;
 use Database\Factories\TenantUsageFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * One period-bucketed quota counter: "tenant T used N of its limit L for quota
@@ -18,6 +18,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * `uniq(tenant_id, kind, period_key)` is what makes `QuotaGuard::consume()`
  * atomic and consume-once — it upserts this row under a cache lock rather than
  * read-modify-writing it.
+ *
+ * Tenant-owned: `BelongsToTenant` constrains every read to the acting tenant and
+ * stamps `tenant_id` on create, so one tenant can never read or spend another's
+ * allowance (Req 1.1, 1.2 / A1).
  *
  * @property int $id
  * @property string $tenant_id
@@ -30,6 +34,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  */
 class TenantUsage extends Model
 {
+    use BelongsToTenant;
+
     /** @use HasFactory<TenantUsageFactory> */
     use HasFactory;
 
@@ -56,14 +62,6 @@ class TenantUsage extends Model
             'used' => 'integer',
             'limit' => 'integer',
         ];
-    }
-
-    /**
-     * @return BelongsTo<Tenant, $this>
-     */
-    public function tenant(): BelongsTo
-    {
-        return $this->belongsTo(Tenant::class);
     }
 
     /**

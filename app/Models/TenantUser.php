@@ -20,6 +20,26 @@ use Illuminate\Database\Eloquent\Relations\Pivot;
  * Modelled as a Pivot so it can back `Tenant::users()` while still being a
  * first-class model with its own id, relations, and timestamps.
  *
+ * ## Why this table carries `tenant_id` but *not* `BelongsToTenant`
+ *
+ * It is the table that **answers** "which tenant is acting?", so it cannot also be
+ * filtered by the answer. `SessionTenantResolver` reads it by `user_id`, before any
+ * tenant is bound, to discover which tenants a signed-in user may act in; scoping it
+ * would make resolution circular and force a `withoutTenantScope()` bypass onto the
+ * very path that establishes the scope — a bypass on the security boundary is worse
+ * than none.
+ *
+ * Two further reasons: `BelongsToMany::attach()`/`detach()` operate on a base query
+ * builder, so a global scope on a pivot silently does not apply to the main write
+ * path (false assurance), and a *user's* view of their memberships is cross-tenant by
+ * nature ("switch tenant" lists all of them).
+ *
+ * Isolation of membership rows therefore comes from the access path, not a scope:
+ * read them through `Tenant::tenantUsers()` / `Tenant::users()` (already constrained
+ * to one tenant) or with an explicit `where('user_id', ...)` for the acting user.
+ * `TenantOwnedModelsGuardTest` records this exemption explicitly, so it is a reviewed
+ * decision rather than an omission.
+ *
  * @property int $id
  * @property string $tenant_id
  * @property int $user_id

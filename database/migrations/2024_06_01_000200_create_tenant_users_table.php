@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Enums\TenantRole;
+use App\Support\Database\TenantSchema;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
@@ -17,7 +18,11 @@ return new class extends Migration
             // A user may belong to several tenants, with a different role in each.
             // Platform super-admins have no row here at all — they operate through
             // the audited actingAsPlatform() context.
-            $table->foreignUlid('tenant_id')->constrained('tenants')->cascadeOnDelete();
+            //
+            // uniq(tenant_id, user_id) keeps that at most one row per pair and doubles
+            // as the leading tenant index. Note this table is deliberately *not*
+            // BelongsToTenant — see the TenantUser model for why.
+            TenantSchema::tenantId($table, 'user_id', 'tenant_users_tenant_id_user_id_unique', unique: true);
             $table->foreignId('user_id')->constrained('users')->cascadeOnDelete();
 
             $table->enum('role', TenantRole::values());
@@ -25,7 +30,8 @@ return new class extends Migration
             $table->timestamp('joined_at')->nullable();
             $table->timestamps();
 
-            $table->unique(['tenant_id', 'user_id'], 'tenant_users_tenant_id_user_id_unique');
+            // The other direction: "which tenants can this user act in?" — the query
+            // tenant resolution issues on every panel request.
             $table->index(['user_id', 'tenant_id'], 'tenant_users_user_id_tenant_id_index');
         });
     }

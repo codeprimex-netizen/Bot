@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\TenantStatus;
+use App\Models\Scopes\TenantScope;
 use Database\Factories\TenantFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -95,11 +96,38 @@ class Tenant extends Model
     /**
      * Period-bucketed quota counters for this tenant.
      *
+     * The relation is already constrained to `tenant_id = $this->id`, which is at
+     * least as strict as `TenantScope` — so the scope is removed here rather than
+     * ANDed on top of it. Without that, reading one tenant's counters from a
+     * platform-admin screen, a console command, or a scheduler (none of which bind a
+     * tenant) would fail closed even though the query names its tenant explicitly.
+     * Guarding *which* `Tenant` instance a caller is allowed to hold is the
+     * ownership check of task 0.4, not this relation's job.
+     *
      * @return HasMany<TenantUsage, $this>
      */
     public function usage(): HasMany
     {
-        return $this->hasMany(TenantUsage::class);
+        $relation = $this->hasMany(TenantUsage::class);
+        $relation->getQuery()->withoutGlobalScope(TenantScope::class);
+
+        return $relation;
+    }
+
+    /**
+     * API keys through which machine callers act as this tenant.
+     *
+     * Scope removed for the same reason as `usage()`: the relation already names its
+     * tenant.
+     *
+     * @return HasMany<TenantApiToken, $this>
+     */
+    public function apiTokens(): HasMany
+    {
+        $relation = $this->hasMany(TenantApiToken::class);
+        $relation->getQuery()->withoutGlobalScope(TenantScope::class);
+
+        return $relation;
     }
 
     /**

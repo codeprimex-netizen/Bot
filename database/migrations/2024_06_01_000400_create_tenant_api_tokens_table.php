@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Support\Database\TenantSchema;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
@@ -21,7 +22,10 @@ return new class extends Migration
     {
         Schema::create('tenant_api_tokens', function (Blueprint $table): void {
             $table->ulid('id')->primary();
-            $table->foreignUlid('tenant_id')->constrained()->cascadeOnDelete();
+
+            // "This tenant's live keys" — the query the panel's API-keys screen runs.
+            TenantSchema::tenantId($table, 'revoked_at', 'tenant_api_tokens_tenant_active_index');
+
             $table->string('name');
 
             // SHA-256 hex of the secret half of the plaintext token.
@@ -31,8 +35,6 @@ return new class extends Migration
             $table->timestamp('expires_at')->nullable();
             $table->timestamp('revoked_at')->nullable();
             $table->timestamps();
-
-            $table->index(['tenant_id', 'revoked_at'], 'tenant_api_tokens_tenant_active_index');
         });
     }
 

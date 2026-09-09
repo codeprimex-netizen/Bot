@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToTenant;
 use App\Services\Tenancy\NewApiToken;
 use Database\Factories\TenantApiTokenFactory;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Str;
 
 /**
@@ -21,8 +21,11 @@ use Illuminate\Support\Str;
  * hash is persisted, so the plaintext exists exactly once — in the
  * `NewApiToken` returned by `issue()`.
  *
- * Task 0.3 adds `BelongsToTenant` here; the `tenant_id` column and index it
- * needs are already in place.
+ * Tenant-owned: `BelongsToTenant` scopes every read to the acting tenant, so the
+ * panel's "my API keys" screen can never list somebody else's. The one query that
+ * legitimately looks across tenants is the *authentication* lookup itself — it runs
+ * before any tenant is bound, and says so with `withoutTenantScope()` in
+ * `DatabaseTenantTokenRepository`.
  *
  * @property string $id
  * @property string $tenant_id
@@ -36,6 +39,8 @@ use Illuminate\Support\Str;
  */
 class TenantApiToken extends Model
 {
+    use BelongsToTenant;
+
     /** @use HasFactory<TenantApiTokenFactory> */
     use HasFactory;
 
@@ -75,14 +80,6 @@ class TenantApiToken extends Model
             'expires_at' => 'datetime',
             'revoked_at' => 'datetime',
         ];
-    }
-
-    /**
-     * @return BelongsTo<Tenant, $this>
-     */
-    public function tenant(): BelongsTo
-    {
-        return $this->belongsTo(Tenant::class);
     }
 
     /**
