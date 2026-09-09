@@ -12,4 +12,6 @@ return [
     App\Providers\CircuitBreakerServiceProvider::class,
     App\Providers\IdempotencyServiceProvider::class,
     App\Providers\RetryServiceProvider::class,
+    App\Providers\OutboxServiceProvider::class,
+    App\Providers\SagaServiceProvider::class,
 ];

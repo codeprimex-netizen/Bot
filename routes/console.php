@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Console\Commands\PruneIdempotencyKeys;
+use App\Console\Commands\RelayOutbox;
 use App\Console\Commands\ResumeQuotaPausedWork;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -72,3 +73,30 @@ Schedule::command(PruneIdempotencyKeys::class)
     ->withoutOverlapping(30)
     ->onOneServer()
     ->description('Prune expired idempotency keys (never a key with no expiry)');
+
+/*
+| The transactional outbox is relayed every minute (Req 31.4 / NFR2, Algorithm 6).
+|
+| Every minute because latency matters here: an outbox row *is* a webhook the receiver is
+| waiting for, and the enqueuer has already committed the state change it describes. A tick
+| with nothing due costs one indexed query against `outbox_claim_index` and writes nothing,
+| so the cheap case is the common case.
+|
+| Concurrency safety is in the relay, not here, and both halves are needed: a claim takes
+| its batch with `FOR UPDATE SKIP LOCKED` **and** leases each row by pushing
+| `next_attempt_at` past the moment any other claimer would look, so two workers cannot
+| deliver one row at the same time on either engine. If a lease ever did expire while its
+| attempt was still running, the `X-Dedup-Key` header every delivery carries means the
+| consumer applies the effect once anyway (Correctness Property 16) — the guarantee does not
+| rest on the schedule.
+|
+| `withoutOverlapping()` and `onOneServer()` are therefore optimisations: they stop a slow
+| pass from being joined by a second one and keep a multi-server install from claiming in
+| lockstep. The 10-minute lock expiry means a killed worker cannot wedge the relay, and a
+| backlog is drained on purpose with `--passes` rather than by a tick that runs unbounded.
+*/
+Schedule::command(RelayOutbox::class)
+    ->everyMinute()
+    ->withoutOverlapping(10)
+    ->onOneServer()
+    ->description('Relay due transactional-outbox rows with their dedup key');

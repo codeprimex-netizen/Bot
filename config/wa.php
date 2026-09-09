@@ -7,6 +7,7 @@ use App\Enums\ErrorClass;
 use App\Enums\QuotaKind;
 use App\Enums\TenantTier;
 use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
+use App\Services\Reliability\HttpOutboxTransport;
 use App\Services\Security\ConfigMasterKeyWrapper;
 use App\Services\Tenancy\Provisioning\Steps\AssignOwnerMembershipStep;
 use App\Services\Tenancy\Provisioning\Steps\AssignSeedPlanStep;
@@ -909,6 +910,145 @@ return [
             // `routes/console.php`). Batched so the pruner never holds a long
             // delete against what is, in steady state, one of the largest tables.
             'prune_batch' => (int) env('WA_IDEMPOTENCY_PRUNE_BATCH', 1_000),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Transactional outbox & relay (Req 31.4 / NFR2)
+        |----------------------------------------------------------------------
+        | Read by `App\Services\Reliability\DatabaseOutbox` and its transport
+        | (Algorithm 6, Correctness Property 16). Nothing here is the guarantee:
+        | atomicity comes from the row being written inside the caller's own
+        | transaction, and exactly-once from `uniq(outbox.dedup_key)` plus the
+        | consumer deduping on the `X-Dedup-Key` header. Every value below has a
+        | compiled-in fallback (`DatabaseOutbox::DEFAULT_*`), so deleting a key
+        | degrades the mechanics and never the "never lose the row".
+        */
+        'outbox' => [
+
+            /*
+            | How an effect leaves the platform. The default really delivers —
+            | it POSTs the payload to the row's `destination` with the dedup
+            | header — so the outbox works from the moment the relay is
+            | scheduled. Phase 5+ channel drivers replace it here (NFR4.2).
+            |
+            | An unusable value is **fatal** when the transport is resolved,
+            | never quietly replaced by the default: the relay marks a row SENT
+            | when `deliver()` returns, so a transport that silently did nothing
+            | would report the whole queue delivered with nothing sent. Same
+            | posture as `wa.dispatch.eligibility.gates`, and for a worse
+            | failure mode.
+            */
+            'transport' => env('WA_OUTBOX_TRANSPORT', HttpOutboxTransport::class),
+
+            // Rows claimed per relay pass — design.md's `relay(int $batch = 200)`.
+            // A fairness/latency knob rather than a throughput cap: the relay runs
+            // every minute (`routes/console.php`) and `--passes` drains a backlog.
+            'batch' => (int) env('WA_OUTBOX_BATCH', 200),
+
+            // How long a claimed row is hidden from other claimers. Claiming pushes
+            // `next_attempt_at` this far ahead, which is what keeps two workers off
+            // one row *after* the `FOR UPDATE SKIP LOCKED` transaction has committed
+            // (and what covers SQLite, where the lock clause compiles away). Must
+            // comfortably outlive one delivery attempt: breaking a live lease costs a
+            // duplicate call — harmless, because the consumer dedups, but wasteful.
+            // A worker killed mid-attempt delays its row by this much.
+            'lease_seconds' => (int) env('WA_OUTBOX_LEASE_SECONDS', 300),
+
+            /*
+            | Total attempts (including the first) before a row **parks**: kept,
+            | FAILED, with its `attempts` and `last_error` intact, held out of the
+            | claim by its spent budget, and handed back only by an operator
+            | (`wa:outbox:relay --requeue=<id>`). There is no DEAD status to drop it
+            | into — Req 31.4 forbids losing the row — so this is a budget, not a
+            | bin.
+            |
+            | Modest on purpose. At the retry matrix's 30-second cap, 12 attempts is
+            | minutes of wall clock, which keeps every redelivery far inside the
+            | dedup horizon below; a budget of hundreds would let a row still be
+            | retrying long after the consumer forgot its dedup key.
+            */
+            'max_attempts' => (int) env('WA_OUTBOX_MAX_ATTEMPTS', 12),
+
+            /*
+            | Days after enqueue beyond which a row is never redelivered
+            | automatically. This exists because Property 16's exactly-once is a
+            | *joint* property: the relay may deliver twice only for as long as the
+            | consumer still remembers the dedup key. Inside this platform that
+            | memory is `idempotency_keys`, pruned after
+            | `reliability.idempotency.retention_days` — so a redelivery after that
+            | window would be indistinguishable from a first delivery and the effect
+            | would be applied a second time.
+            |
+            | `null` (the default) tracks that retention window exactly. A value is
+            | clamped to it in code and can therefore only ever be *shorter*: a
+            | horizon longer than the ledger it depends on would be a silent
+            | double-effect, so config cannot ask for one. A row that reaches the
+            | horizon is parked, not deleted, and `Outbox::requeue()` refuses it —
+            | redelivering it is a decision for the owning subsystem, which can
+            | enqueue a fresh intent with a fresh dedup key.
+            */
+            'dedup_horizon_days' => env('WA_OUTBOX_DEDUP_HORIZON_DAYS') === null
+                ? null
+                : (int) env('WA_OUTBOX_DEDUP_HORIZON_DAYS'),
+
+            /*
+            | The default (HTTP) transport's own limits. Bounded because the claim
+            | lease has to outlive a whole attempt, so an unbounded read is not an
+            | option. The client's own `retry()` is deliberately unused — the relay
+            | owns the attempt budget and the jittered backoff, and a transport that
+            | retried internally would multiply the two and hide attempts from the
+            | row.
+            */
+            'http' => [
+                'timeout' => (int) env('WA_OUTBOX_HTTP_TIMEOUT', 10),
+                'connect_timeout' => (int) env('WA_OUTBOX_HTTP_CONNECT_TIMEOUT', 5),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Saga orchestration (Req 15.5 / B6; Req 31.5 / NFR2)
+        |----------------------------------------------------------------------
+        | Read by `App\Services\Reliability\SagaDefinitionRegistry` and
+        | `PersistedSagaOrchestrator` (Algorithm 8, Correctness Property 18).
+        */
+        'saga' => [
+
+            /*
+            | The ordered list of `SagaDefinition` classes, each claiming one
+            | `sagas.type`. This is the extension seam: a later phase adds a saga by
+            | writing a definition and appending it here, and nothing in the
+            | orchestrator changes.
+            |
+            | **Empty is legal and currently correct** — the order → payment →
+            | fulfilment saga belongs to Phase 5. Unlike
+            | `wa.tenancy.provisioning.steps`, an empty list here is not fatal at
+            | boot; instead, running a saga whose `type` no entry claims raises
+            | `InvalidSagaDefinitionException::unknownType()`, so the failure lands
+            | at the moment it means something. Every other misconfiguration (a
+            | missing class, two definitions claiming one type, a definition with no
+            | steps or a duplicated step name) is fatal when the registry is asked,
+            | before any forward action runs — a skipped step would produce a saga
+            | that reserves stock and takes payment but never fulfils, and reports
+            | COMPLETED.
+            |
+            | Phase 5 appends:
+            |   App\Services\Commerce\Sagas\OrderFulfilmentSaga::class,
+            */
+            'definitions' => [
+                //
+            ],
+
+            // How long a saga's forward (`{sagaId}:{step}`) and compensation
+            // (`{sagaId}:{step}:compensate`) idempotency keys are kept. Longer than
+            // `idempotency.retention_days` on purpose: these must outlive the longest
+            // a saga can sit COMPENSATING waiting for a dependency to return, because
+            // a pruned compensation key makes the next unwind attempt
+            // indistinguishable from a first one — and re-running a compensation that
+            // already succeeded is the double effect the ledger exists to prevent.
+            // Falls back to `PersistedSagaOrchestrator::DEFAULT_KEY_RETENTION_DAYS`.
+            'key_retention_days' => (int) env('WA_SAGA_KEY_RETENTION_DAYS', 90),
         ],
     ],
 
