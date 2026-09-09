@@ -57,6 +57,22 @@ final class SagaWorld
      */
     private static array $compensationFaults = [];
 
+    /**
+     * Step names whose forward action lands its effect and then returns something the
+     * idempotency ledger cannot store.
+     *
+     * @var list<string>
+     */
+    private static array $recordingFaults = [];
+
+    /**
+     * Step names whose forward action lands its effect and *then* throws — a step that
+     * breaks its own contract.
+     *
+     * @var list<string>
+     */
+    private static array $orphanFaults = [];
+
     public static function reset(): void
     {
         self::$effects = [];
@@ -64,6 +80,8 @@ final class SagaWorld
         self::$compensations = [];
         self::$forwardFaults = [];
         self::$compensationFaults = [];
+        self::$recordingFaults = [];
+        self::$orphanFaults = [];
     }
 
     /*
@@ -81,6 +99,20 @@ final class SagaWorld
     {
         self::$forwards[] = $step;
         self::$effects[$step] = $handle;
+    }
+
+    /**
+     * A forward action that ran and left **nothing** to undo — a validation, a read, a
+     * naturally idempotent notify (`SagaStepResult::none()`).
+     *
+     * Recorded as a forward call but not as an effect, so a read-only step still appears
+     * in the execution order while contributing nothing that `liveEffects()` could ever
+     * report. Its `compensate()` is still invoked, exactly as the design requires, and
+     * `release()` records that invocation without there being an effect to remove.
+     */
+    public static function performed(string $step): void
+    {
+        self::$forwards[] = $step;
     }
 
     /**
@@ -166,6 +198,43 @@ final class SagaWorld
     public static function compensationShouldFail(string $step): bool
     {
         return in_array($step, self::$compensationFaults, true);
+    }
+
+    /**
+     * This step's effect lands and its *result* is then unstorable, so
+     * `IdempotencyStore::once()` raises `UnrecordableResultException` on the way out.
+     *
+     * The interesting half is what the step is left with: the ledger records `null`, so
+     * the compensation handle is gone and the step must still be undone. A compensation
+     * consults this to know that an absent handle is legitimate here and nowhere else.
+     */
+    public static function failRecordingAt(string $step): void
+    {
+        self::$recordingFaults[] = $step;
+    }
+
+    public static function recordingShouldFail(string $step): bool
+    {
+        return in_array($step, self::$recordingFaults, true);
+    }
+
+    /**
+     * This step's effect lands and its forward action then throws — a step that breaks
+     * `SagaStepDefinition::forward()`'s all-or-nothing contract.
+     *
+     * Kept separate from every other fault because it is the one case the orchestrator
+     * cannot repair: a `FAILED` step is never compensated, so that effect is orphaned by
+     * the step's own bug. Asserted on its own, positively, rather than folded into the
+     * main property — see the boundary test in `SagaAtomicityPropertyTest`.
+     */
+    public static function orphanAt(string $step): void
+    {
+        self::$orphanFaults[] = $step;
+    }
+
+    public static function shouldOrphan(string $step): bool
+    {
+        return in_array($step, self::$orphanFaults, true);
     }
 
     /**
