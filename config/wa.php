@@ -9,6 +9,9 @@ use App\Enums\TenantTier;
 use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
 use App\Services\Reliability\HttpOutboxTransport;
 use App\Services\Security\ConfigMasterKeyWrapper;
+use App\Services\Security\EncryptionKeyRewrapStore;
+use App\Services\Security\Pii\ConfigTenantPiiPatternSource;
+use App\Services\Security\SigningSecretRewrapStore;
 use App\Services\Tenancy\Provisioning\Steps\AssignOwnerMembershipStep;
 use App\Services\Tenancy\Provisioning\Steps\AssignSeedPlanStep;
 use App\Services\Tenancy\Provisioning\Steps\AssignTenantTierStep;
@@ -1153,6 +1156,482 @@ return [
             // deployments. Set WA_MASTER_KEY in production so rotating the app key
             // does not orphan every tenant's DEK.
             'app_key_id' => 'app',
+
+            /*
+            |------------------------------------------------------------------
+            | Scheduled rotation (Req 32.6 / NFR3, task 4.2)
+            |------------------------------------------------------------------
+            | Two rotations, both non-destructive, run by `wa:security:rotate-deks`
+            | and `wa:security:rotate-master-key` (see `routes/console.php`):
+            |
+            |   - a **DEK** rotation adds a version and demotes the previous one to
+            |     RETIRING, which still decrypts — so nothing stored becomes
+            |     unreadable and re-encryption stays lazy;
+            |   - a **master key** rotation re-seals stored DEKs and signing secrets
+            |     under the new key. Only the *seal* changes, never the DEK, so no
+            |     ciphertext anywhere is touched.
+            |
+            | Nothing here can retire a key version: RETIRED refuses to decrypt, so
+            | retiring one that is still referenced would be silent data loss. That
+            | step needs a registry of every encrypted column and is deliberately
+            | absent until one exists (see `App\Services\Security\DekRotator`).
+            */
+            'rotation' => [
+                // Age of a lineage's ACTIVE version at which it is rotated. 90 days is
+                // the usual compliance answer; lowering it costs one row per lineage
+                // per rotation and nothing else.
+                'dek_after_days' => (int) env('WA_DEK_ROTATE_AFTER_DAYS', 90),
+
+                // Lineages per DEK sweep, and rows per store per re-wrap pass. Both
+                // are bounded because every one is a key-store round trip: a large
+                // estate drains over successive ticks (or `--passes`) rather than in
+                // one unbounded run.
+                'batch' => (int) env('WA_KEY_ROTATE_BATCH', 100),
+
+                /*
+                | Tables holding master-key-sealed material, which a master-key
+                | rotation must therefore re-seal. Every entry implements
+                | `App\Services\Security\RewrapStore`.
+                |
+                | This list is the difference between a complete rotation and a
+                | time-bomb: a table missing from it stays sealed under the retired
+                | key, and becomes permanently unopenable the moment an operator
+                | removes that key from the key store. A phase that seals anything new
+                | adds one class and one line here — and an entry that cannot be
+                | resolved is fatal, because a silently skipped store is a silently
+                | un-rotated table.
+                */
+                'stores' => [
+                    EncryptionKeyRewrapStore::class,
+                    SigningSecretRewrapStore::class,
+                ],
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | The KMS / Vault seam (Req 32.6 / NFR3; NFR4.2)
+        |----------------------------------------------------------------------
+        | Read **only** when `encryption.wrapper` is `KmsKeyWrapper`; the default
+        | `ConfigMasterKeyWrapper` never touches any of it, so a single-node install
+        | can ignore this block entirely (design § Optional dependency matrix).
+        |
+        | Switching the platform onto a KMS is four environment values:
+        |
+        |   WA_KEY_WRAPPER="App\Services\Security\KmsKeyWrapper"
+        |   WA_KMS_DRIVER=vault
+        |   WA_VAULT_ADDR=https://vault.internal:8200
+        |   WA_VAULT_TOKEN=…            # or WA_VAULT_TOKEN_FILE for an injected token
+        |
+        | Nothing above the seam changes: the ciphertext format, the DEK lifecycle,
+        | and every existing test stay as they are.
+        */
+        'kms' => [
+            // `vault` for the Vault transit engine, or a class implementing
+            // App\Services\Security\KmsClient. A misconfiguration is a startup error,
+            // never a silently unencrypted platform.
+            'driver' => env('WA_KMS_DRIVER', 'vault'),
+
+            /*
+            | Vault transit (App\Services\Security\VaultTransitKmsClient):
+            |   vault secrets enable transit
+            |   vault write -f transit/keys/wa-master type=aes256-gcm96
+            | The key type must be an AEAD one — the tenant binding is carried in
+            | transit's `associated_data`, and a non-AEAD key would ignore it.
+            */
+            'vault' => [
+                'address' => env('WA_VAULT_ADDR', ''),
+
+                // The token itself, or a file it is read from on every request so an
+                // agent-renewed token needs no restart. Never logged.
+                'token' => env('WA_VAULT_TOKEN', ''),
+                'token_file' => env('WA_VAULT_TOKEN_FILE'),
+
+                // Enterprise / HCP namespace, if any.
+                'namespace' => env('WA_VAULT_NAMESPACE'),
+
+                'mount' => env('WA_VAULT_TRANSIT_MOUNT', 'transit'),
+                'key' => env('WA_VAULT_TRANSIT_KEY', 'wa-master'),
+
+                // Tight on purpose: a KMS call sits inside every encrypted read and
+                // write, so a slow key store must fail fast (and open its breaker)
+                // rather than hold a request open.
+                'timeout' => (int) env('WA_VAULT_TIMEOUT', 5),
+                'connect_timeout' => (int) env('WA_VAULT_CONNECT_TIMEOUT', 3),
+            ],
+
+            /*
+            | A KMS is a fallible network dependency on the hot path, so it gets the
+            | same treatment as every other one: the circuit breaker of task 3.2 and
+            | the retry matrix of task 3.6 (`App\Services\Security\GuardedKmsClient`).
+            |
+            | The retry budget is deliberately tiny because it waits *inline*, inside
+            | whatever request asked to encrypt something. `KeyUnavailableException`
+            | is retryable, so the queue worker or the HTTP client retries the whole
+            | unit of work — which is cheaper and safer than sleeping here.
+            */
+            'guard' => [
+                // False removes the breaker and the inline retry, leaving the raw
+                // client. For a test or a diagnosis, not for production.
+                'enabled' => (bool) env('WA_KMS_GUARD', true),
+
+                // `circuit_breakers.name` under CircuitScope::Provider. One name for
+                // the key store as a whole: it is a platform dependency, not a
+                // per-tenant one, and a per-tenant breaker would let one tenant's
+                // failures hide a platform-wide outage.
+                'breaker' => env('WA_KMS_BREAKER', 'kms'),
+
+                'attempts' => (int) env('WA_KMS_ATTEMPTS', 2),
+                'max_delay_ms' => (int) env('WA_KMS_MAX_DELAY_MS', 250),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | HMAC signing secrets & dual-secret rotation (Req 32.6 / NFR3)
+        |----------------------------------------------------------------------
+        | Webhook secrets are shared with a peer, and the two of you cannot swap one
+        | at the same instant — so rotation keeps the **old secret verifying** while
+        | only the new one signs (`App\Services\Security\SigningSecretStore`,
+        | `wa:security:rotate-hmac`). Without that window, rotating rejects every
+        | signature the peer has in flight, and the pressure that creates ("skip
+        | verification for a minute") is the spoofing the signature exists to stop.
+        |
+        | Secrets are sealed by the same `KeyWrapper` DEKs use, so they inherit the
+        | KMS above and are re-sealed by the same master-key rotation.
+        */
+        'hmac' => [
+            // Length of a newly issued secret. 32 bytes is a full SHA-256 block of
+            // entropy; the floor in code is 16.
+            'secret_bytes' => (int) env('WA_HMAC_SECRET_BYTES', 32),
+
+            // HMAC hash, and how a signature is presented (`sha256=<hex>` — the shape
+            // Meta and most gateways use). Verification also accepts a bare digest.
+            //
+            // Changing the algorithm is an *algorithm migration*, not a rotation: it
+            // invalidates in-flight signatures for every scope at once, which is why
+            // it is platform config rather than something a rotation can smuggle in.
+            'algorithm' => env('WA_HMAC_ALGORITHM', 'sha256'),
+            'prefix' => env('WA_HMAC_PREFIX', 'sha256='),
+
+            // Age at which a scope's signing secret is rotated.
+            'rotate_after_days' => (int) env('WA_HMAC_ROTATE_AFTER_DAYS', 30),
+
+            // How long the previous secret keeps verifying. Must comfortably exceed
+            // the time it takes to reconfigure a peer — 0 is a hard cut-over and
+            // rejects everything already signed.
+            'overlap_hours' => (int) env('WA_HMAC_OVERLAP_HOURS', 48),
+
+            // Scopes rotated per sweep.
+            'batch' => (int) env('WA_HMAC_BATCH', 100),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | PII redaction (Req 7.3 / A7; Req 32.2 / NFR3 — Correctness Property 15)
+        |----------------------------------------------------------------------
+        | Two consumers, one definition of what PII is (`App\Support\Pii\PiiScanner`):
+        |
+        |   - `App\Services\Security\Pii\PiiRedactor` — **reversible**, on the way to an
+        |     LLM/embedding provider. Values become tokens; a request-scoped, in-memory
+        |     token map turns them back for the customer-facing reply.
+        |   - `App\Support\Pii\LogPiiScrubber` — **irreversible**, wired as a Monolog
+        |     processor onto every channel (`App\Logging\RedactingLogManager`), so phone
+        |     numbers are masked and message bodies are hashed on every log line.
+        |
+        | Nothing here can switch either of them off. Detection thresholds are not
+        | configurable either: whether 16 digits are a card number is a Luhn check, not
+        | an operator preference. What *is* configurable is the tenant-specific pattern
+        | list and the cost bounds around it.
+        */
+        'pii' => [
+            /*
+            | Implementation of `App\Services\Security\Pii\TenantPiiPatternSource`. The
+            | default reads the list below; a tenant-settings screen replaces it with a
+            | database-backed source and nothing else changes.
+            */
+            'pattern_source' => env('WA_PII_PATTERN_SOURCE', ConfigTenantPiiPatternSource::class),
+
+            /*
+            | Extra identifiers a tenant considers PII, as **regex bodies** (no
+            | delimiters, no flags — both are chosen in code):
+            |
+            |   'tenant_patterns' => [
+            |       '*'             => ['\bPOL-\d{8}\b'],   // every tenant
+            |       'acme'          => ['\bORD[A-Z]{2}\d{6}\b'],
+            |       '01HZY8Q0J9...' => ['\b[A-Z]{2}\d{7}\b'],
+            |   ],
+            |
+            | Keyed by `*`, tenant slug, or tenant id. Every entry is validated before
+            | it is ever run (`TenantPatternCompiler`): one that does not compile, that
+            | matches the empty string, that would swallow most of an ordinary sentence,
+            | or that has the shape of a catastrophically backtracking regex is
+            | **skipped with a logged reason**, never applied and never fatal — a typo
+            | in this list must not be able to stop a tenant's messages from being
+            | redacted by the built-in detectors.
+            */
+            'tenant_patterns' => [],
+
+            // Bounds on that list. A pattern is per-message work on the egress path, so
+            // both the count and the length are capped rather than trusted.
+            'max_patterns_per_tenant' => (int) env('WA_PII_MAX_PATTERNS', 16),
+            'max_pattern_length' => (int) env('WA_PII_MAX_PATTERN_LENGTH', 200),
+
+            /*
+            | Backtracking steps PCRE may spend on one tenant pattern before giving up
+            | (`App\Support\Pii\BoundedPcre`). This is the *real* ReDoS defence — the
+            | validator's heuristics only catch the obvious shapes. A pattern that
+            | exhausts the budget contributes nothing for that text and is not retried
+            | on it; the built-in detectors have already run, so the message is still
+            | redacted. Raising it buys more expressive patterns at the cost of a
+            | larger worst case per message.
+            */
+            'backtrack_limit' => (int) env('WA_PII_BACKTRACK_LIMIT', 100_000),
+
+            /*
+            | Cost bounds for the log processor, which runs on *every* log line and so
+            | must never be the slowest thing in a request. Exceeding a bound truncates
+            | or caps — it never emits unredacted text.
+            */
+            'log' => [
+                'max_string_length' => (int) env('WA_PII_LOG_MAX_STRING_LENGTH', 4000),
+                'max_depth' => (int) env('WA_PII_LOG_MAX_DEPTH', 8),
+                'max_items' => (int) env('WA_PII_LOG_MAX_ITEMS', 100),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Prompt guardrails / jailbreak defence (Req 13.8 / B4; Req 32.7 / NFR3)
+        |----------------------------------------------------------------------
+        | The four layers of design § AI 1.3 — instruction hierarchy, input
+        | classifier, delimiter fencing, output validation — read by
+        | `App\Services\Abuse\LayeredGuardrail` and by nothing else.
+        |
+        | **There is no key here that disables inspection**, and that is deliberate:
+        | design's abuse table lists prompt injection as a hard-enforced defence, so
+        | what is configurable is *how strict* and *how loud*, never *whether*. In
+        | particular there is no "fail open" switch — an input the classifier cannot
+        | classify blocks (fail closed) and a reply that fails validation is
+        | suppressed (fail safe), in code, with no bypass parameter.
+        */
+        'guardrail' => [
+            /*
+            | Characters above which an inbound text is refused as OVERSIZED rather
+            | than partially examined. Twice WhatsApp's own 4 096-character message
+            | limit, so a legitimate customer message cannot reach it and exceeding it
+            | is itself anomalous. Lowering it makes the guardrail stricter; raising it
+            | widens the window an unexamined payload could hide in.
+            */
+            'max_input_chars' => (int) env('WA_GUARDRAIL_MAX_INPUT_CHARS', 8192),
+
+            /*
+            | Whether FLAG-level findings (obfuscation, a degraded auxiliary classifier)
+            | get an `abuse_events` row. BLOCKs are always recorded — that is not a
+            | tunable — so turning this off only trades reviewer signal for write volume.
+            */
+            'record_flags' => (bool) env('WA_GUARDRAIL_RECORD_FLAGS', true),
+
+            /*
+            | **Optional** additional `App\Services\Abuse\InjectionClassifier`
+            | implementations, e.g. a model-backed one once the LLM layer lands (task
+            | 15.x). They can only make a verdict stricter: an optional classifier that
+            | throws degrades to the deterministic verdict (recorded as
+            | CLASSIFIER_DEGRADED), never to "allow". The deterministic
+            | `HeuristicInjectionClassifier` is *not* in this list because it is not
+            | optional — emptying this array leaves it running.
+            */
+            'classifiers' => [],
+
+            /*
+            | Extra platform/tenant policy patterns, as full regexes (delimiters
+            | included). A match raises CUSTOM_PATTERN, which blocks. An unusable
+            | pattern is a startup error rather than a rule that silently never fires.
+            */
+            'patterns' => [
+                'injection' => [],
+            ],
+
+            'fence' => [
+                /*
+                | The sentence prepended to the platform layer telling the model that the
+                | fenced block is untrusted data. `%s` twice = the opening and closing
+                | delimiters. Overridable per deployment (wording and language matter to
+                | how well a model follows it); null uses
+                | `InstructionHierarchy::DEFAULT_NOTICE`. It cannot be removed — fencing
+                | without the notice leaves the model no reason to treat the block as data.
+                */
+                'notice' => env('WA_GUARDRAIL_FENCE_NOTICE'),
+            ],
+
+            'output' => [
+                /*
+                | Length of the verbatim word run that counts as a system-prompt leak.
+                | Floored at 4 in code: a two- or three-word window would flag ordinary
+                | phrases ("how can i help"). Eight consecutive words are something a model
+                | reproduces by copying, not by paraphrase.
+                */
+                'leak_shingle_words' => (int) env('WA_GUARDRAIL_LEAK_SHINGLE_WORDS', 8),
+
+                /*
+                | Replies matching any of these are suppressed (OUTPUT_POLICY_VIOLATION) —
+                | for compliance phrasing a business may not use. Full regexes; one that
+                | does not compile is skipped rather than fatal, because output validation
+                | must keep running on the built-in checks.
+                */
+                'banned_patterns' => [],
+            ],
+
+            /*
+            | The per-conversation rate limit design § AI 1.3 asks for: repeated blocked
+            | messages in one conversation trip a **bounded** kill-switch on the session.
+            | Bounded because this arm is automatic, and an unbounded automatic kill would
+            | be a denial-of-service an attacker could aim at a tenant by sending injection
+            | payloads to their number. `block_limit` of 0 disables the arm; only an
+            | operator flip may be indefinite.
+            */
+            'conversation' => [
+                'block_window_seconds' => (int) env('WA_GUARDRAIL_BLOCK_WINDOW_SECONDS', 900),
+                'block_limit' => (int) env('WA_GUARDRAIL_BLOCK_LIMIT', 5),
+                'auto_kill_seconds' => (int) env('WA_GUARDRAIL_AUTO_KILL_SECONDS', 3600),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Abuse trail & per-session kill-switch (Req 32.7 / NFR3)
+        |----------------------------------------------------------------------
+        | `abuse_events` is append-only (triggers + grants, like `audit_logs`) and
+        | tenant-scoped on read; rows written on the anonymous signup path carry
+        | `tenant_id = NULL`. Nothing here can disable recording: a block that is not
+        | recorded is indistinguishable from a block that never happened.
+        */
+        'abuse' => [
+            /*
+            | Key for the identity digests (`App\Services\Abuse\IdentityDigest`) that let
+            | the platform *count* an email/phone/device without *storing* one. Keyed
+            | rather than a bare hash because phone numbers and email addresses are
+            | enumerable. Defaults to APP_KEY; set this separately so rotating the app key
+            | does not break the abuse trail's correlations.
+            */
+            'hash_key' => env('WA_ABUSE_HASH_KEY'),
+
+            /*
+            | Cache namespace for kill-switch state and the velocity counters. The TTL is
+            | the *upper bound on a counting window*, so it must comfortably exceed the
+            | longest window configured under `anti_fraud` (the device counter's day) or a
+            | counter would expire mid-window and reset itself.
+            */
+            'cache' => [
+                'store' => env('WA_ABUSE_CACHE_STORE'),
+                'ttl' => (int) env('WA_ABUSE_CACHE_TTL', 172_800),
+            ],
+
+            'kill_switch' => [
+                /*
+                | How often an attempt to use a killed session is recorded. A campaign
+                | hitting a stopped session must leave a trail without flooding it; the
+                | refusal itself is never throttled, only its recording.
+                */
+                'attempt_record_seconds' => (int) env('WA_KILL_SWITCH_ATTEMPT_RECORD_SECONDS', 300),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Anti-fraud: signup velocity, OTP, device/IP (Req 32.7 / NFR3)
+        |----------------------------------------------------------------------
+        | design § Abuse / anti-fraud row 1 — free-trial farming. Read by
+        | `App\Services\Abuse\HeuristicAntiFraudGuard`, which runs on the anonymous
+        | registration path and therefore keys every counter on a keyed digest of an
+        | identity or an address, never on a tenant.
+        |
+        | Every limit is `{max, window_seconds}`; `max = 0` switches that counter off.
+        | **Every refusal expires with its window** — there is no persistent block flag
+        | anywhere in this layer, because signup traffic arrives through carrier NAT and
+        | corporate egress, so a permanent address-based block would eventually lock out
+        | real customers. The address limits are deliberately looser than the
+        | identity/device ones for the same reason, and `trusted_ips` is the operator
+        | break-glass for a known shared egress.
+        */
+        'anti_fraud' => [
+            'signup' => [
+                // One mailbox / phone number: three attempts an hour.
+                'identity' => [
+                    'max' => (int) env('WA_SIGNUP_IDENTITY_MAX', 3),
+                    'window_seconds' => (int) env('WA_SIGNUP_IDENTITY_WINDOW', 3600),
+                ],
+
+                // One browser profile: three trials a day. Defeated by clearing storage —
+                // which is why it is one of four counters, not the only one.
+                'device' => [
+                    'max' => (int) env('WA_SIGNUP_DEVICE_MAX', 3),
+                    'window_seconds' => (int) env('WA_SIGNUP_DEVICE_WINDOW', 86_400),
+                ],
+
+                // One address: looser, because an office shares one.
+                'ip' => [
+                    'max' => (int) env('WA_SIGNUP_IP_MAX', 8),
+                    'window_seconds' => (int) env('WA_SIGNUP_IP_WINDOW', 3600),
+                ],
+
+                // One /24 (or /64): the counter an attacker with a range has to burn.
+                'subnet' => [
+                    'max' => (int) env('WA_SIGNUP_SUBNET_MAX', 20),
+                    'window_seconds' => (int) env('WA_SIGNUP_SUBNET_WINDOW', 3600),
+                ],
+            ],
+
+            'otp' => [
+                // Sends per identity — protects the SMS bill as much as the account.
+                'request_identity' => [
+                    'max' => (int) env('WA_OTP_REQUEST_IDENTITY_MAX', 5),
+                    'window_seconds' => (int) env('WA_OTP_REQUEST_IDENTITY_WINDOW', 3600),
+                ],
+
+                'request_ip' => [
+                    'max' => (int) env('WA_OTP_REQUEST_IP_MAX', 20),
+                    'window_seconds' => (int) env('WA_OTP_REQUEST_IP_WINDOW', 3600),
+                ],
+
+                // Wrong codes before verification pauses. This is what makes a 6-digit
+                // code unguessable; cleared by a correct code, so an honest customer who
+                // mistypes twice is not locked out for the rest of the window.
+                'failure' => [
+                    'max' => (int) env('WA_OTP_FAILURE_MAX', 5),
+                    'window_seconds' => (int) env('WA_OTP_FAILURE_WINDOW', 900),
+                ],
+            ],
+
+            /*
+            | Addresses (or dotted/colon prefixes like `203.0.113.`) whose *address*
+            | counters are skipped: a customer's office range, the platform's own test
+            | runners. Identity and device counting stay in force, so an allowlisted
+            | address is not an unlimited signup source.
+            */
+            'trusted_ips' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env('WA_ANTI_FRAUD_TRUSTED_IPS', ''))
+            ), static fn (string $ip): bool => $ip !== '')),
+
+            /*
+            | Email domains refused outright (design: "disposable-email/velocity block").
+            | A short, high-signal list plus whatever `WA_DISPOSABLE_EMAIL_DOMAINS` adds —
+            | not a mirror of a 100 000-entry blocklist, which would belong in a table and
+            | would misfire on domains that stop being disposable.
+            */
+            'disposable_email_domains' => array_values(array_unique([
+                ...[
+                    'mailinator.com', 'guerrillamail.com', 'sharklasers.com', '10minutemail.com',
+                    'tempmail.com', 'temp-mail.org', 'yopmail.com', 'throwawaymail.com',
+                    'getnada.com', 'trashmail.com', 'dispostable.com', 'maildrop.cc',
+                    'fakeinbox.com', 'mailnesia.com', 'discard.email', 'mohmal.com',
+                ],
+                ...array_filter(array_map(
+                    static fn (string $domain): string => strtolower(trim($domain)),
+                    explode(',', (string) env('WA_DISPOSABLE_EMAIL_DOMAINS', ''))
+                ), static fn (string $domain): bool => $domain !== ''),
+            ])),
         ],
     ],
 

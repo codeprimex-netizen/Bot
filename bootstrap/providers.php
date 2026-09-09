@@ -9,6 +9,8 @@ return [
     App\Providers\PlanGateServiceProvider::class,
     App\Providers\DispatchServiceProvider::class,
     App\Providers\SecurityServiceProvider::class,
+    App\Providers\PiiServiceProvider::class,
+    App\Providers\AbuseServiceProvider::class,
     App\Providers\CircuitBreakerServiceProvider::class,
     App\Providers\IdempotencyServiceProvider::class,
     App\Providers\RetryServiceProvider::class,

@@ -178,6 +178,127 @@ final class KeyUnavailableException extends SecurityException implements HttpExc
         ));
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | KMS / Vault transport (task 4.2, Req 32.6 / NFR3)
+    |--------------------------------------------------------------------------
+    | A KMS is a network dependency, so it fails in ways a config-file master key
+    | cannot: unreachable, unauthorized, rate-limited, fenced off by its own circuit
+    | breaker. Every one of them lands here, which is what keeps "the KMS is down"
+    | and "there is no master key" on the same fail-closed path — a 503 the caller
+    | retries, never a write that skips encryption.
+    */
+
+    /**
+     * A KMS-backed wrapper is selected but the store is not configured (no address,
+     * no token, no key name), so nothing can be sealed or opened.
+     *
+     * Deliberately *not* a degradation to the config master key: silently falling back
+     * to a weaker key store is how a production deployment ends up believing it uses a
+     * KMS when it does not.
+     */
+    public static function kmsNotConfigured(string $detail): self
+    {
+        return new self(sprintf(
+            'The configured key store is unusable: %s. Encryption fails closed until it is configured '
+            .'(wa.security.kms) or wa.security.encryption.wrapper is pointed back at a wrapper that works.',
+            self::redact($detail),
+        ));
+    }
+
+    /**
+     * The KMS could not be reached at all — DNS, TLS, connect timeout, or a circuit
+     * breaker holding the door shut after repeated failures.
+     *
+     * Carries no URL and no provider message: both routinely quote request payloads.
+     */
+    public static function kmsUnreachable(string $operation): self
+    {
+        return new self(sprintf(
+            'The key store could not be reached for [%s]. No plaintext fallback exists; the operation '
+            .'fails closed and may be retried.',
+            self::redact($operation),
+        ));
+    }
+
+    /**
+     * The KMS answered, and refused: a bad token, a policy denial, a missing key, or
+     * a context that did not authenticate.
+     *
+     * The status code is kept because it is what an operator needs (403 means fix the
+     * policy, 404 means fix the key name, 5xx means wait); the body is discarded.
+     */
+    public static function kmsRejected(string $operation, int $status): self
+    {
+        return new self(sprintf(
+            'The key store rejected [%s] with status %d. Nothing was decrypted and nothing was written.',
+            self::redact($operation),
+            $status,
+        ));
+    }
+
+    /**
+     * The KMS answered 200 with something this client cannot use — a missing field, a
+     * non-base64 payload, a ciphertext in an unknown format.
+     *
+     * Treated exactly like a refusal: a response we cannot parse is a response we
+     * must not act on.
+     */
+    public static function kmsMalformedResponse(string $operation): self
+    {
+        return new self(sprintf(
+            'The key store returned an unusable response for [%s], so it was discarded rather than trusted.',
+            self::redact($operation),
+        ));
+    }
+
+    /**
+     * A stored `kms_key_id` does not name a key this client can address — material
+     * restored from another deployment, or a key store swapped underneath the data.
+     */
+    public static function kmsUnknownKeyId(string $keyId): self
+    {
+        return new self(sprintf(
+            'Key id [%s] is not addressable by the configured key store, so material sealed under it '
+            .'cannot be opened here.',
+            self::redact($keyId),
+        ));
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Signing secrets (task 4.2 — dual-secret HMAC rotation)
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * A scope has no signing secret to sign with, and one could not be issued.
+     *
+     * Verification does *not* land here — an inbound signature checked against a
+     * scope that has no secret is simply invalid (`false`), because an unknown scope
+     * must never produce a 503 an attacker can trigger at will.
+     */
+    public static function missingSigningSecret(string $scope): self
+    {
+        return new self(sprintf(
+            'No signing secret could be issued for scope [%s], so nothing can be signed for it.',
+            self::redact($scope),
+        ));
+    }
+
+    /**
+     * A stored signing secret would not open: the master key it was sealed under is
+     * gone, or the row was tampered with.
+     */
+    public static function signingSecretUnreadable(string $scope, int $version): self
+    {
+        return new self(sprintf(
+            'The signing secret for scope [%s] at version %d did not open under its master key.',
+            self::redact($scope),
+            $version,
+        ));
+    }
+
     /**
      * The platform's own cipher configuration is unusable (unknown AEAD, impossible
      * key length), so refusing is the only safe answer.

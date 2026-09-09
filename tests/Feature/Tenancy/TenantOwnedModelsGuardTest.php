@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\IdempotencyKey;
 use App\Models\OutboxMessage;
+use App\Models\SigningSecret;
 use App\Models\Tenant;
 use App\Models\TenantApiToken;
 use App\Models\TenantUsage;
@@ -57,6 +58,17 @@ function tenantScopeExemptions(): array
         // See each migration's docblock for the full argument.
         OutboxMessage::class => 'reliability tier: nullable tenant_id; the relay runs with no tenant bound',
         IdempotencyKey::class => 'reliability tier: nullable tenant_id; webhook dedup runs before tenant resolution',
+
+        // Security tier (task 4.2, Req 32.6 / NFR3). Same two reasons as the reliability
+        // tier. First, null is a legitimate value: a payment gateway's webhook secret
+        // belongs to the platform, not to a tenant, and BelongsToTenant cannot write a null
+        // tenant_id. Second — and this is the decisive one — verifying an inbound webhook's
+        // HMAC is what *identifies* the session and therefore the tenant, so the read
+        // happens before any tenant is bound; the rotation sweep runs in the console with
+        // none bound either. Isolation is carried by the `scope` string (which embeds the
+        // tenant or session id) and by the AAD each secret is sealed with, so a row cannot
+        // be moved between scopes. See the migration docblock.
+        SigningSecret::class => 'security tier: nullable tenant_id; HMAC verification runs before tenant resolution',
     ];
 }
 

@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Support\Audit;
 
+use App\Support\Pii\PiiKeyRules;
+use App\Support\Pii\PiiMask;
+
 /**
  * The privacy pass every audit payload goes through before it is hashed and
  * stored (Req 24.2 / D1; the design's "phone numbers redacted, message bodies
@@ -26,39 +29,17 @@ namespace App\Support\Audit;
  * The value rule also runs on strings reached under harmless-looking keys, because
  * a phone number pasted into a `reason` or a `note` is still a phone number.
  *
- * **Scope note.** Task 4.4 introduces `PiiRedactor::redact/rehydrate` — the
- * reversible, tenant-configurable redactor used on the LLM egress path
- * (Correctness Property 15). This class is deliberately smaller and
- * **irreversible**: an audit row must not carry a token map that could rehydrate
- * the PII it just removed. When 4.4 lands, this class should delegate its pattern
- * *definitions* to the shared redactor and keep its one-way behaviour.
+ * **Scope note.** Task 4.4's `PiiRedactor::redact/rehydrate` is the *reversible*,
+ * tenant-configurable redactor used on the LLM egress path (Correctness Property 15).
+ * This class stays deliberately smaller and **irreversible**: an audit row must not
+ * carry a token map that could rehydrate the PII it just removed. What the two share
+ * is the *definitions* — the key rules come from `App\Support\Pii\PiiKeyRules` and the
+ * digit mask from `App\Support\Pii\PiiMask`, so a key spelled `apiKey` here and
+ * `api_key` in a log line cannot be treated differently.
  */
 final class AuditPayloadRedactor
 {
-    public const string REDACTED = '[redacted]';
-
-    /**
-     * Keys whose value never belongs in an audit row in any form.
-     */
-    private const string SECRET_KEY_PATTERN = '/(password|passwd|secret|token|api[_-]?key|private[_-]?key|'
-        .'credential|authorization|bearer|otp|\bpin\b|cvv|signature|\bdek\b|\bkek\b|cookie|session[_-]?id)/i';
-
-    /**
-     * Keys that hold message content: stored as a digest, never as text.
-     */
-    /**
-     * Deliberately *not* here: `reason`, `note`, and `comment`. Those are written by an
-     * operator to explain a decision, and an audit trail whose explanations are hashed
-     * explains nothing. They still get the value-level phone masking below.
-     */
-    private const string CONTENT_KEY_PATTERN = '/^(body|text|message|content|caption|transcript|prompt|'
-        .'completion|reply|answer|question)$/i';
-
-    /**
-     * Keys that hold a subscriber identity, masked whatever their shape.
-     */
-    private const string PHONE_KEY_PATTERN = '/(phone|msisdn|whatsapp|\bjid\b|wa[_-]?id|\bnumber\b|recipient|'
-        .'\bto\b|\bfrom\b|contact[_-]?number)/i';
+    public const string REDACTED = PiiMask::REDACTED;
 
     /**
      * An international-format number: a `+` is required, so dates and ids with
@@ -118,15 +99,15 @@ final class AuditPayloadRedactor
 
     private function forKey(string $key, mixed $value): mixed
     {
-        if (preg_match(self::SECRET_KEY_PATTERN, $key) === 1) {
+        if (PiiKeyRules::isSecret($key)) {
             return self::REDACTED;
         }
 
-        if (preg_match(self::CONTENT_KEY_PATTERN, $key) === 1) {
+        if (PiiKeyRules::isContent($key)) {
             return $this->digestOf($value);
         }
 
-        if (is_string($value) && preg_match(self::PHONE_KEY_PATTERN, $key) === 1) {
+        if (is_string($value) && PiiKeyRules::isIdentity($key)) {
             // A bare number is masked whole (so even a short one is masked); anything
             // with more structure — a WhatsApp JID, "+91 98765 43210 (work)" — is masked
             // in place, so the rest of the value survives for an operator to read.
@@ -152,23 +133,12 @@ final class AuditPayloadRedactor
     }
 
     /**
-     * Keep the first two and last two digits — enough for an operator to correlate
-     * an entry with a support ticket, not enough to be a subscriber identifier.
+     * Keep the first two and last two digits, through the shared mask — so an audit
+     * row and a log line describe the same number the same way, and a digit script
+     * `/\D/` cannot see is masked here too.
      */
     private function maskDigits(string $value): string
     {
-        $digits = preg_replace('/\D+/', '', $value) ?? '';
-        $prefix = str_starts_with(ltrim($value), '+') ? '+' : '';
-        $length = strlen($digits);
-
-        if ($length === 0) {
-            return $value;
-        }
-
-        if ($length <= 4) {
-            return $prefix.str_repeat('*', $length);
-        }
-
-        return $prefix.substr($digits, 0, 2).str_repeat('*', $length - 4).substr($digits, -2);
+        return PiiMask::digits($value);
     }
 }

@@ -5,6 +5,9 @@ declare(strict_types=1);
 use App\Console\Commands\PruneIdempotencyKeys;
 use App\Console\Commands\RelayOutbox;
 use App\Console\Commands\ResumeQuotaPausedWork;
+use App\Console\Commands\RotateMasterKey;
+use App\Console\Commands\RotateSigningSecrets;
+use App\Console\Commands\RotateTenantKeys;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -100,3 +103,79 @@ Schedule::command(RelayOutbox::class)
     ->withoutOverlapping(10)
     ->onOneServer()
     ->description('Relay due transactional-outbox rows with their dedup key');
+
+/*
+| Per-tenant DEKs are rotated daily (Req 32.6 / NFR3, task 4.2).
+|
+| Daily rather than every minute because the interval is measured in *months*
+| (`wa.security.encryption.rotation.dek_after_days`, 90 by default): a lineage that becomes
+| due at 03:00 is no more overdue at 03:01 than at the next night's run, and every rotation
+| is a key-store round trip. A tick with nothing due is one indexed query
+| (`encryption_keys.status` + `created_at`) and no writes.
+|
+| The safety of running it unattended is in the rotation, not here, and it is structural: a
+| rotation *adds* a version and demotes the previous one to `RETIRING`, which still
+| decrypts. Nothing stored becomes unreadable, re-encryption stays lazy, and **no version is
+| ever retired** by any scheduled job — `RETIRED` refuses to decrypt, so retiring one that is
+| still referenced would be silent data loss (see `App\Services\Security\DekRotator`).
+|
+| A tenant whose key store refuses a seal keeps its previous version `ACTIVE` and is retried
+| tomorrow, so one failure cannot stop the sweep. `withoutOverlapping()` and `onOneServer()`
+| are optimisations: two concurrent sweeps would collide on
+| `uniq(tenant_id, purpose, active_flag)` and one would simply lose its insert.
+*/
+Schedule::command(RotateTenantKeys::class)
+    ->dailyAt('03:10')
+    ->withoutOverlapping(60)
+    ->onOneServer()
+    ->description('Rotate per-tenant DEKs older than the configured interval (old versions stay readable)');
+
+/*
+| The KMS master key is rotated monthly, and outstanding re-wraps are swept up hourly
+| (Req 32.6 / NFR3, task 4.2).
+|
+| Two entries for one job, because the two halves have different costs. Minting a new master
+| key version is one call and belongs on a slow, predictable cadence. Re-sealing every stored
+| DEK and signing secret under it is two key-store calls *per row*, so it is batched — and an
+| estate that does not finish in one pass has to be picked up again without waiting a month,
+| or the previous master key can never be retired. Hence `--rewrap-only` hourly: it mints
+| nothing, and when there is nothing outstanding it is one indexed query per store.
+|
+| Re-wrapping cannot orphan data, which is what makes this safe to schedule at all: only the
+| *seal* changes, never the DEK, so every stored ciphertext keeps naming the same key version
+| and keeps decrypting. Rows that cannot be opened are left byte-for-byte untouched and
+| reported — the command exits non-zero for exactly that case, because removing the old
+| master key while any remain would make the loss permanent.
+*/
+Schedule::command(RotateMasterKey::class)
+    ->monthlyOn(1, '02:30')
+    ->withoutOverlapping(120)
+    ->onOneServer()
+    ->description('Rotate the KMS master key and re-wrap material sealed under the previous one');
+
+Schedule::command(RotateMasterKey::class, ['--rewrap-only'])
+    ->hourly()
+    ->withoutOverlapping(60)
+    ->onOneServer()
+    ->description('Finish outstanding master-key re-wraps so the previous key can be retired');
+
+/*
+| HMAC webhook secrets are rotated hourly (Req 32.6 / NFR3, task 4.2).
+|
+| Hourly, not daily, because this sweep does two things and the second is time-based: it
+| rotates scopes past `wa.security.hmac.rotate_after_days`, and it purges secrets whose
+| overlap window has closed. Neither is urgent, but both are cheap — one indexed query each
+| when there is nothing to do — and an hourly cadence keeps closed windows from lingering as
+| rows for most of a day.
+|
+| Rotation is deliberately invisible to the peer: the previous secret keeps **verifying** for
+| `wa.security.hmac.overlap_hours` while only the new one **signs**, so requests already in
+| flight still authenticate. The window is enforced by the clock in
+| `SigningSecretStore::verify()`, not by this job — a purge that has not run therefore cannot
+| widen a window, and a secret past its deadline is refused whether or not its row survives.
+*/
+Schedule::command(RotateSigningSecrets::class)
+    ->hourly()
+    ->withoutOverlapping(30)
+    ->onOneServer()
+    ->description('Rotate HMAC signing secrets with an overlap window and purge closed ones');

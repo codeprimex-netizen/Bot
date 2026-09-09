@@ -215,6 +215,42 @@ final class VersionedCache
     }
 
     /**
+     * Increment a counter inside the namespace and return its new value.
+     *
+     * The counting primitive behind velocity limits (`App\Support\Cache\VelocityCounter`,
+     * task 4.5): `add()` first so the entry is created **with the namespace TTL** and then
+     * expires on its own, `increment()` afterwards so concurrent workers cannot lose each
+     * other's hits. Two callers incrementing at once therefore both count — which matters
+     * for an anti-abuse counter, where a lost hit is a bypass.
+     *
+     * A store whose `increment()` is not atomic (or not supported) still ends up counting,
+     * via a read-modify-write fallback: the count may then be low under heavy concurrency,
+     * never high, so a threshold cannot be crossed by accident.
+     */
+    public function increment(string $key, int $by = 1): int
+    {
+        $repository = $this->repository();
+        $versionedKey = $this->key($key);
+
+        if ($repository->add($versionedKey, $by, $this->ttlSeconds)) {
+            return $by;
+        }
+
+        $incremented = $repository->increment($versionedKey, $by);
+
+        if (is_int($incremented)) {
+            return $incremented;
+        }
+
+        $current = $repository->get($versionedKey);
+        $next = (is_int($current) ? $current : 0) + $by;
+
+        $repository->put($versionedKey, $next, $this->ttlSeconds);
+
+        return $next;
+    }
+
+    /**
      * Drop one entry. Prefer `bump()` when a write may have invalidated entries
      * beyond the one you can name.
      */
