@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Pest\TestSuite;
 use Tests\TestCase;
 
 /*
@@ -21,3 +22,22 @@ pest()->extend(TestCase::class)
     ->in('Feature');
 
 pest()->extend(TestCase::class)->in('Unit');
+
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * The running test case, typed so Laravel's HTTP and auth helpers are visible
+ * to static analysis inside Pest closures (where `$this` is only known as the
+ * PHPUnit base class).
+ */
+function thisTest(): TestCase
+{
+    /** @var TestCase $case */
+    $case = TestSuite::getInstance()->test;
+
+    return $case;
+}

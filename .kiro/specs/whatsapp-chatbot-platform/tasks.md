@@ -25,13 +25,13 @@ This is a **regeneration** for 100% alignment with the upgraded design: it keeps
   - [x] 0.1 Create `tenants`, `tenant_users`, `tenant_usage` migrations and Eloquent models with backed enums (`TenantStatus`, `QuotaKind`)
     - Model relationships, unique constraints (`tenant_users(tenant_id,user_id)`, `tenant_usage(tenant_id,kind,period_key)`), status index
     - _(Req 1.1 / A1)_
-  - [~] 0.2 Implement `TenantContext` (`current`/`set`/`actingAsPlatform`/`forget`) with per-request resolution by panel session, subdomain, and API key
+  - [x] 0.2 Implement `TenantContext` (`current`/`set`/`actingAsPlatform`/`forget`) with per-request resolution by panel session, subdomain, and API key
     - _(Req 1.1, 1.5 / A1)_
   - [~] 0.3 Implement `BelongsToTenant` trait: global `TenantScope` + auto-fill `tenant_id` on `creating`; add the trait, `tenant_id` column, and `idx(tenant_id, ...)` to all 22 reused engine tables via migrations
     - _(Req 1.1, 1.2 / A1)_
   - [~] 0.4 Add `CrossTenantAccessException` (403) and a defense-in-depth ownership check on find-by-id / relation-load paths
     - _(Req 1.3 / A1)_
-  - [~] 0.5 Namespace WhatsApp auth-state, exports, and media under `storage/tenants/{tenantId}/` with ULID filenames
+  - [x] 0.5 Namespace WhatsApp auth-state, exports, and media under `storage/tenants/{tenantId}/` with ULID filenames
     - _(Req 1.4 / A1)_
   - [ ]* 0.6 **PBT — Property 1 (Tenant isolation):** seed 2 tenants; assert every read path returns only rows where `tenant_id = t.id` and cross-tenant reads raise `CrossTenantAccessException`
     - **Validates: Requirements 1.1, 1.2, 1.3 / A1**

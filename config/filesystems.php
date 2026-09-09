@@ -49,6 +49,63 @@ return [
             'report' => false,
         ],
 
+        /*
+        |----------------------------------------------------------------------
+        | Per-tenant private areas (see App\Services\Tenancy\TenantStorage)
+        |----------------------------------------------------------------------
+        |
+        | One disk per storage area, all rooted under `storage/app/private`
+        | (outside the web root, never symlinked into `public/`) and all
+        | `private` with no `url`, so nothing here can be served directly.
+        | Paths inside each disk are namespaced `tenants/{tenantId}/...`.
+        |
+        | Areas are separate disks so exports/media can later be pointed at
+        | object storage per data-region while WhatsApp auth state stays on
+        | restrictive node-local storage the Bridge process reads directly.
+        | `throw => true` turns a failed write into an exception instead of a
+        | silently lost tenant file.
+        |
+        */
+
+        'wa_auth' => [
+            'driver' => 'local',
+            'root' => storage_path(env('WA_AUTH_ROOT', 'app/private/wa-auth')),
+            'visibility' => 'private',
+            'permissions' => [
+                'file' => ['public' => 0600, 'private' => 0600],
+                'dir' => ['public' => 0700, 'private' => 0700],
+            ],
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
+        'wa_exports' => [
+            'driver' => 'local',
+            'root' => storage_path(env('WA_EXPORTS_ROOT', 'app/private/wa-exports')),
+            'visibility' => 'private',
+            'permissions' => [
+                'file' => ['public' => 0640, 'private' => 0640],
+                'dir' => ['public' => 0750, 'private' => 0750],
+            ],
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
+        'wa_media' => [
+            'driver' => 'local',
+            'root' => storage_path(env('WA_MEDIA_ROOT', 'app/private/wa-media')),
+            'visibility' => 'private',
+            'permissions' => [
+                'file' => ['public' => 0640, 'private' => 0640],
+                'dir' => ['public' => 0750, 'private' => 0750],
+            ],
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
