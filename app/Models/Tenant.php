@@ -37,6 +37,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property TenantStatus $status
  * @property string|null $plan_id
  * @property \Illuminate\Support\Carbon|null $trial_ends_at
+ * @property \Illuminate\Support\Carbon|null $suspended_at
+ * @property \Illuminate\Support\Carbon|null $cancelled_at
  * @property string $timezone
  * @property string $locale
  * @property \Illuminate\Support\Carbon|null $created_at
@@ -59,6 +61,8 @@ class Tenant extends Model
         'status',
         'plan_id',
         'trial_ends_at',
+        'suspended_at',
+        'cancelled_at',
         'timezone',
         'locale',
     ];
@@ -71,6 +75,8 @@ class Tenant extends Model
         return [
             'status' => TenantStatus::class,
             'trial_ends_at' => 'datetime',
+            'suspended_at' => 'datetime',
+            'cancelled_at' => 'datetime',
         ];
     }
 
@@ -166,6 +172,12 @@ class Tenant extends Model
 
     /**
      * Whether the tenant may perform billable/outbound work right now.
+     *
+     * The convenient read of the same rule `App\Services\Tenancy\TenantLifecycle`
+     * enforces. Ask the service — `canSendOutbound()` / `assertCanSendOutbound()` /
+     * `canMutate()` — anywhere the answer *gates* something: it accepts a bare tenant
+     * id, fails closed on an unknown one, and names the refusal in a 403. This method
+     * is for display and for callers that already hold the model.
      */
     public function isOperational(): bool
     {

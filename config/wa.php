@@ -77,6 +77,25 @@ return [
 
         /*
         |----------------------------------------------------------------------
+        | Tenant lifecycle (Req 1.1 / A1; Req 28.2 / D5)
+        |----------------------------------------------------------------------
+        | `App\Services\Tenancy\TenantLifecycle` owns the TRIAL -> ACTIVE ->
+        | SUSPENDED -> CANCELLED state machine. The transitions themselves are not
+        | configurable — they are the design's lifecycle diagram, encoded in
+        | `App\Enums\TenantStatus::allowedNext()` — but how long a cancelled tenant's
+        | data survives is a policy, and policies belong here.
+        */
+        'lifecycle' => [
+            // Days between cancellation and the verified hard delete (task 34.3).
+            // Read, never stored per tenant, so shortening or extending the window
+            // applies to tenants already inside it. Must be > 0: a zero window would
+            // make data purgeable the instant a tenant cancels, which is the one thing
+            // a retention window exists to prevent.
+            'retention_days' => (int) env('WA_TENANT_RETENTION_DAYS', 30),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
         | Tenant resolution (Req 1.1 / A1)
         |----------------------------------------------------------------------
         | Doors a request may identify its tenant through, in precedence order:

@@ -44,17 +44,27 @@ class TenantFactory extends Factory
         ]);
     }
 
+    /**
+     * A suspended tenant, timestamped as `TenantLifecycle::suspend()` would leave it:
+     * outbound blocked, inbound still logged, panels read-only.
+     */
     public function suspended(): static
     {
         return $this->state(fn (array $attributes): array => [
             'status' => TenantStatus::Suspended,
+            'suspended_at' => now()->subDay(),
         ]);
     }
 
+    /**
+     * A cancelled tenant still inside its retention window — `cancelled_at` is set, so
+     * the purge (task 34.3) is scheduled but not yet due.
+     */
     public function cancelled(): static
     {
         return $this->state(fn (array $attributes): array => [
             'status' => TenantStatus::Cancelled,
+            'cancelled_at' => now()->subDay(),
         ]);
     }
 }
