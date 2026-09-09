@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Tenancy\AuditedTenantLifecycle;
 use App\Services\Tenancy\ConfiguredTierResolver;
 use App\Services\Tenancy\DatabaseTenantTokenRepository;
+use App\Services\Tenancy\Provisioning\TenantProvisioningStepRegistry;
 use App\Services\Tenancy\RequestTenantContext;
 use App\Services\Tenancy\Resolvers\ChainTenantResolver;
 use App\Services\Tenancy\TenantContext;
@@ -53,6 +54,12 @@ class TenancyServiceProvider extends ServiceProvider
         // the same handful of tenants for their lane weight thousands of times per
         // window (Req 1.6, 1.7 / A1).
         $this->app->singleton(TierResolver::class, ConfiguredTierResolver::class);
+
+        // Reads `wa.tenancy.provisioning.steps` and resolves the classes it names. A
+        // singleton because the registry itself holds nothing but the container — the
+        // *steps* are built fresh on every `steps()` call, so no step can carry one
+        // tenant's provisioning state into the next one's on a long-lived worker.
+        $this->app->singleton(TenantProvisioningStepRegistry::class);
 
         // Stateless: it holds no per-tenant state of its own, and every guard on it is
         // a pure function of the tenant's status, so one instance serves every caller.

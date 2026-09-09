@@ -9,9 +9,14 @@ use App\Exceptions\Tenancy\InvalidTenantTransitionException;
 use App\Exceptions\Tenancy\TenantNotOperationalException;
 use App\Models\Tenant;
 use App\Services\Audit\AuditService;
+use App\Services\Tenancy\Provisioning\TenantProvisioningContext;
+use App\Services\Tenancy\Provisioning\TenantProvisioningSpec;
+use App\Services\Tenancy\Provisioning\TenantProvisioningStep;
+use App\Services\Tenancy\Provisioning\TenantProvisioningStepRegistry;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Support\Carbon;
 use InvalidArgumentException;
+use Throwable;
 
 /**
  * The tenant state machine, enforced and audited (Req 1.1 / A1; Req 10.3 / B1;
@@ -39,6 +44,15 @@ use InvalidArgumentException;
  *   `platform.mode.entered` / `.exited` pair to the platform chain per transition —
  *   two rows about the bypass, and no extra evidence about the tenant.
  *
+ * ## Provisioning is the same shape, one size up
+ *
+ * `provision()` (Req 1.8 / A1) is the tenant's birth rather than a transition, and it
+ * has to make five writes look like one. It is built the same way as the transitions —
+ * one transaction, one audit entry on the tenant's own chain — with two additions: the
+ * work itself is a configured, ordered list of `TenantProvisioningStep`s rather than
+ * code in this class, and steps that touch state outside the database compensate
+ * explicitly when the transaction rolls back. See that method's docblock.
+ *
  * ## Everything else is deliberately small
  *
  * No queue draining, no cache invalidation, no session teardown on suspend. Suspension
@@ -63,7 +77,78 @@ final class AuditedTenantLifecycle implements TenantLifecycle
         private readonly AuditService $audit,
         private readonly ConnectionInterface $connection,
         private readonly TenantStorage $storage,
+        private readonly TenantProvisioningStepRegistry $steps,
     ) {}
+
+    /*
+    |--------------------------------------------------------------------------
+    | Provisioning (Req 1.8 / A1)
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Run the configured provisioning pipeline as one atomic unit.
+     *
+     * Read `TenantLifecycle::provision()` for the contract, the accepted spec and the
+     * two steps Req 1.8 still owes. This method is deliberately nothing but the
+     * transaction and the compensation loop — it knows how to *fail*, and the steps know
+     * what a tenant needs.
+     *
+     * ## Why the compensation loop exists at all
+     *
+     * If every step were SQL on one connection, the transaction alone would satisfy
+     * "atomically" and this would be a `foreach`. It is not: provisioning creates a
+     * directory on disk, seals a DEK, and warms two in-process caches, and a `ROLLBACK`
+     * moves none of that back. So the pipeline tracks which steps it *started* — started,
+     * not finished, because a step that threw halfway is precisely the one with a partial
+     * effect — and undoes them in exact reverse order.
+     *
+     * ## Order of the two halves
+     *
+     * The transaction is rolled back **first**, then compensations run. Compensating
+     * before the rollback would have each `rollback()` racing the very rows the rollback
+     * is about to remove (and, for anything reading the database, seeing state that is
+     * about to cease existing). This way each compensation runs against the final,
+     * post-rollback world: the tenant row is already gone, which is why a `rollback()`
+     * must never assume it can read one.
+     *
+     * ## Failures inside a compensation are swallowed, on purpose
+     *
+     * The caller needs the *original* failure — the taken slug, the unreachable key
+     * store — because that is the one it can act on. A compensation that fails would
+     * replace it with something like "unable to delete directory", turning a 409 a
+     * signup form could render into an unrelated 500. Suppressed, not ignored: the
+     * design's observability layer (task 6.x) is where the residue gets reported, and the
+     * only residue possible here is an empty directory under a ULID no tenant row names.
+     */
+    public function provision(array $spec): Tenant
+    {
+        $context = new TenantProvisioningContext(TenantProvisioningSpec::fromArray($spec));
+
+        // The pipeline is resolved before the transaction opens: a misconfigured step list
+        // is a deployment error, and it must not be discovered with a transaction held
+        // open and a tenant row already written.
+        $steps = $this->steps->steps();
+
+        /** @var list<TenantProvisioningStep> $started */
+        $started = [];
+
+        try {
+            $this->connection->transaction(function () use ($steps, $context, &$started): void {
+                foreach ($steps as $step) {
+                    $started[] = $step;
+                    $context->markApplied($step->name());
+                    $step->apply($context);
+                }
+            });
+        } catch (Throwable $failure) {
+            $this->compensate($started, $context);
+
+            throw $failure;
+        }
+
+        return $context->tenant();
+    }
 
     /*
     |--------------------------------------------------------------------------
@@ -230,6 +315,23 @@ final class AuditedTenantLifecycle implements TenantLifecycle
     | Internals
     |--------------------------------------------------------------------------
     */
+
+    /**
+     * Undo, newest first, everything the database transaction could not.
+     *
+     * @param  list<TenantProvisioningStep>  $started
+     */
+    private function compensate(array $started, TenantProvisioningContext $context): void
+    {
+        foreach (array_reverse($started) as $step) {
+            try {
+                $step->rollback($context);
+            } catch (Throwable) {
+                // Deliberately swallowed — see provision()'s docblock. The original failure
+                // is the one the caller must receive.
+            }
+        }
+    }
 
     /**
      * The status write, plus the timestamps that make the history legible.

@@ -14,7 +14,7 @@ use Illuminate\Support\Carbon;
  * lifecycle").
  *
  * ```
- * [*] -> TRIAL         provision            (task 1.2)
+ * [*] -> TRIAL         provision            provision()
  * TRIAL -> ACTIVE      subscribe            activate()
  * ACTIVE -> SUSPENDED  non-payment / abuse  suspend()
  * SUSPENDED -> ACTIVE  reactivate           reactivate()
@@ -51,10 +51,6 @@ use Illuminate\Support\Carbon;
  *
  * ## Not here yet
  *
- * - `provision(array $spec): Tenant` — **task 1.2**. It must create the tenant,
- *   wallet, default chatbot, per-tenant DEK, storage prefix, and seed plan atomically
- *   (Req 1.8 / A1); `wallets` (task 10.1) and `chatbots` (task 11.1) do not exist yet,
- *   so it is absent rather than stubbed.
  * - `export(Tenant): ExportArchive` — data portability, Req 28.2 / D5.
  * - `offboard(Tenant): void` — **task 34.3**. `cancel()` already records *when* the
  *   purge falls due (`purgeDueAt()`, `isPurgeDue()`); `offboard()` is the executor
@@ -63,6 +59,90 @@ use Illuminate\Support\Carbon;
  */
 interface TenantLifecycle
 {
+    /*
+    |--------------------------------------------------------------------------
+    | Birth (Req 1.8 / A1)
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Create a tenant and everything it needs to be usable — **atomically** (Req 1.8).
+     *
+     * ```php
+     * $tenant = $lifecycle->provision([
+     *     'name' => 'Acme Corp',            // required; the slug is derived from it
+     *     'owner' => $user,                 // optional: creates the owner membership
+     *     'plan' => 'growth',               // optional: defaults to wa.tenancy.default_plan_slug
+     *     'timezone' => 'Asia/Kolkata',     // optional: defaults to wa.tenancy.*
+     *     'tier' => TenantTier::DedicatedWorker,   // optional: writes a tenant_tiers row
+     * ]);
+     * ```
+     *
+     * The result is always a `TRIAL` tenant — the design's diagram starts
+     * `[*] --> TRIAL: provision`, and converting to `ACTIVE` is `activate()`, which
+     * audits the conversion.
+     *
+     * ## The work is a configured pipeline, not a body of code
+     *
+     * Req 1.8's six elements belong to five phases of the build, so the list of things
+     * provisioning does is **data**: `wa.tenancy.provisioning.steps`, resolved by
+     * `Provisioning\TenantProvisioningStepRegistry`, each entry a
+     * `Provisioning\TenantProvisioningStep`. A later phase adds a provisioning concern
+     * by appending a class there, and this method does not change.
+     *
+     * That is also where the requirement's remaining debt is recorded, rather than in a
+     * document: **task 10.1 must register a `CreateWalletStep`** and **task 11.1 must
+     * register a `CreateDefaultChatbotStep`** — `wallets` and `chatbots` do not exist
+     * yet, so those two steps are absent rather than stubbed, and Req 1.8 is only fully
+     * satisfied once both land. `TenantProvisioningStepRegistryTest` asserts the
+     * registered list verbatim so the omission fails a test instead of being forgotten.
+     *
+     * ## Atomicity across three kinds of state
+     *
+     * Every step runs inside **one database transaction**, so all the SQL commits or
+     * none of it does. Steps whose effects the database cannot undo — the auth-state
+     * directory on disk, the in-process DEK cache, the tier cache — declare a
+     * compensating `rollback()`, and a failure runs those in exact reverse order after
+     * the transaction has been rolled back. A failed provisioning therefore leaves **no
+     * tenant row, no plan association, no key, no membership, and no directory**.
+     *
+     * ## Idempotency: this is a create, and it stays one
+     *
+     * Calling it twice with the same spec raises `TenantAlreadyExistsException` (409); it
+     * does **not** return the existing tenant. A slug collision is far more often two
+     * customers picking the same company name than one customer retrying, and handing
+     * back somebody else's workspace is the worst available outcome. Callers that need
+     * at-most-once semantics across retries (a webhook, a queued signup) should key the
+     * whole call on their own idempotency key. Individual steps are still idempotent
+     * where their primitive is — the DEK and the directory both converge — so a retry
+     * after a partial failure cannot produce duplicates of those.
+     *
+     * ## Context: no tenant bound, or platform mode — never another tenant
+     *
+     * The two sanctioned callers are self-service registration, which runs with **no
+     * tenant bound** (the user has authenticated but acts for nobody yet), and an admin
+     * screen inside the audited `asPlatform()`. Steps therefore name their tenant
+     * explicitly rather than read `TenantContext`.
+     *
+     * Calling it from *inside another tenant's* context is refused with
+     * `CrossTenantAccessException` (403) by task 0.4's ownership guard, which will not
+     * attribute a new row to a tenant other than the acting one — it cannot distinguish
+     * an admin creating an account from a tenant writing into somebody else's. The
+     * refusal is atomic like any other failure, so nothing is left behind; a caller that
+     * legitimately provisions while holding a tenant (a reseller panel) opens platform
+     * mode for the call, which is audited.
+     *
+     * @param  array<array-key, mixed>  $spec  see `Provisioning\TenantProvisioningSpec` for
+     *                                         the accepted keys and their defaults
+     *
+     * @throws \App\Exceptions\Tenancy\InvalidProvisioningSpecException on an unknown key or an unusable value
+     * @throws \App\Exceptions\Tenancy\TenantAlreadyExistsException when the slug/subdomain is taken (409)
+     * @throws \App\Exceptions\Tenancy\SeedPlanUnavailableException when no seed plan can be resolved (503)
+     * @throws \App\Exceptions\Security\KeyUnavailableException when the key store cannot seal the tenant's DEK (503)
+     * @throws \App\Exceptions\Tenancy\CrossTenantAccessException when called from inside another tenant's context
+     */
+    public function provision(array $spec): Tenant;
+
     /*
     |--------------------------------------------------------------------------
     | Transitions

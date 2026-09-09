@@ -4,6 +4,13 @@ declare(strict_types=1);
 
 use App\Enums\TenantTier;
 use App\Services\Security\ConfigMasterKeyWrapper;
+use App\Services\Tenancy\Provisioning\Steps\AssignOwnerMembershipStep;
+use App\Services\Tenancy\Provisioning\Steps\AssignSeedPlanStep;
+use App\Services\Tenancy\Provisioning\Steps\AssignTenantTierStep;
+use App\Services\Tenancy\Provisioning\Steps\CreateTenantRecordStep;
+use App\Services\Tenancy\Provisioning\Steps\EnsureStoragePrefixStep;
+use App\Services\Tenancy\Provisioning\Steps\ProvisionEncryptionKeyStep;
+use App\Services\Tenancy\Provisioning\Steps\RecordProvisioningAuditStep;
 use App\Services\Tenancy\Resolvers\ApiTokenTenantResolver;
 use App\Services\Tenancy\Resolvers\SessionTenantResolver;
 use App\Services\Tenancy\Resolvers\SubdomainTenantResolver;
@@ -74,6 +81,47 @@ return [
         // `PlanRepository::defaultPlan()`; a tenant with no plan is gated to no
         // features and no allowance rather than to everything.
         'default_plan_slug' => env('WA_TENANT_DEFAULT_PLAN_SLUG', 'starter'),
+
+        /*
+        |----------------------------------------------------------------------
+        | Provisioning pipeline (Req 1.8 / A1)
+        |----------------------------------------------------------------------
+        | Req 1.8: provisioning a tenant creates its tenant record, wallet, default
+        | chatbot, per-tenant DEK, storage prefix, and seed plan **atomically**. Those
+        | six things belong to five different phases of the build, so the list of what
+        | provisioning does is data rather than a method body: `TenantLifecycle::provision`
+        | runs the classes below, in order, inside one transaction, and never has to
+        | change when a phase adds one.
+        |
+        | Every entry implements `App\Services\Tenancy\Provisioning\TenantProvisioningStep`.
+        | Order matters twice: the tenant record must come first, and any step with
+        | effects the database cannot roll back (the filesystem, a key store, a cache)
+        | belongs near the end, after the cheap failures have had their chance. Failure
+        | compensation runs in exact reverse.
+        |
+        | An entry that cannot be resolved is fatal, unlike `resolvers` above: a skipped
+        | resolver means one fewer door and fails closed, while a skipped provisioning
+        | step means a tenant created without its plan, its key or its storage — which is
+        | indistinguishable afterwards from a tenant that legitimately has none.
+        |
+        | **Req 1.8 is not fully satisfied yet.** Two of its six elements have no table:
+        | the wallet arrives with task 10.1 (`wallets`) and the default chatbot with task
+        | 11.1 (`chatbots`), and each of those tasks must append its own step here. They
+        | are absent rather than stubbed — an empty "creates the wallet" class would hide
+        | the gap — and `TenantProvisioningStepRegistryTest` pins this list verbatim so
+        | the omission fails a test instead of being forgotten.
+        */
+        'provisioning' => [
+            'steps' => [
+                CreateTenantRecordStep::class,
+                AssignSeedPlanStep::class,
+                AssignOwnerMembershipStep::class,
+                AssignTenantTierStep::class,
+                ProvisionEncryptionKeyStep::class,
+                EnsureStoragePrefixStep::class,
+                RecordProvisioningAuditStep::class,
+            ],
+        ],
 
         /*
         |----------------------------------------------------------------------
