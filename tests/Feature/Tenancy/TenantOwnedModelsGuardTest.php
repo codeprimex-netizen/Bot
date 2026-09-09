@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use App\Models\Concerns\BelongsToTenant;
+use App\Models\IdempotencyKey;
+use App\Models\OutboxMessage;
 use App\Models\Tenant;
 use App\Models\TenantApiToken;
 use App\Models\TenantUsage;
@@ -42,6 +44,19 @@ function tenantScopeExemptions(): array
         // answer: tenant resolution reads it by user_id before any tenant is bound.
         // See the TenantUser docblock for the full reasoning.
         TenantUser::class => 'identity/resolution tier: read by user_id before a tenant exists',
+
+        // Reliability tier (task 3.1, Req 31.2, 31.4 / NFR2). Both tables keep a
+        // *nullable* tenant_id for attribution and offboarding cascade, and null is a
+        // legitimate value: platform-level effects and pre-tenant-resolution webhook
+        // dedup have no tenant. BelongsToTenant cannot write a null tenant_id — its
+        // creating hook throws MissingTenantContextException instead — so the trait
+        // would make legal rows impossible, and the relay/intake workers that read
+        // these tables run with no tenant bound at all. Isolation is provided
+        // explicitly instead: OutboxMessage::forTenant() names its tenant at the call
+        // site, and idempotency scopes carry the tenant in the key where it matters.
+        // See each migration's docblock for the full argument.
+        OutboxMessage::class => 'reliability tier: nullable tenant_id; the relay runs with no tenant bound',
+        IdempotencyKey::class => 'reliability tier: nullable tenant_id; webhook dedup runs before tenant resolution',
     ];
 }
 

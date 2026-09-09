@@ -11,6 +11,7 @@ use Database\Factories\TenantFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
@@ -71,6 +72,23 @@ class Tenant extends Model
             'status' => TenantStatus::class,
             'trial_ends_at' => 'datetime',
         ];
+    }
+
+    /**
+     * The plan this tenant is on — null for a tenant that has none yet, or whose
+     * plan was retired under it (`tenants.plan_id` is `nullOnDelete`).
+     *
+     * Read it through `PlanRepository::forTenant()` on hot paths: `PlanGate` and
+     * `QuotaGuard` consult the plan on every message, and this relation is a query
+     * each time.
+     *
+     * @return BelongsTo<Plan, $this>
+     */
+    public function plan(): BelongsTo
+    {
+        $this->assertRelationVisible('plan');
+
+        return $this->belongsTo(Plan::class);
     }
 
     /**

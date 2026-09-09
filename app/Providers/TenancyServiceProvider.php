@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Services\Tenancy\ConfiguredTierResolver;
 use App\Services\Tenancy\DatabaseTenantTokenRepository;
 use App\Services\Tenancy\RequestTenantContext;
 use App\Services\Tenancy\Resolvers\ChainTenantResolver;
@@ -11,6 +12,7 @@ use App\Services\Tenancy\TenantContext;
 use App\Services\Tenancy\TenantOwnershipGuard;
 use App\Services\Tenancy\TenantResolver;
 use App\Services\Tenancy\TenantTokenRepository;
+use App\Services\Tenancy\TierResolver;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
@@ -39,6 +41,11 @@ class TenancyServiceProvider extends ServiceProvider
         $this->app->singleton(TenantOwnershipGuard::class);
 
         $this->app->singleton(TenantTokenRepository::class, DatabaseTenantTokenRepository::class);
+
+        // Singleton so the per-instance memo actually pays off: a dispatch loop asks
+        // the same handful of tenants for their lane weight thousands of times per
+        // window (Req 1.6, 1.7 / A1).
+        $this->app->singleton(TierResolver::class, ConfiguredTierResolver::class);
 
         $this->app->singleton(TenantResolver::class, function (Application $app): TenantResolver {
             return new ChainTenantResolver($this->configuredResolvers($app));

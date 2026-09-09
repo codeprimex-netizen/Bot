@@ -15,6 +15,10 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
+        // The plan catalogue comes first: a tenant cannot be provisioned without a
+        // plan to put it on (`wa.tenancy.default_plan_slug`).
+        $this->call(PlanSeeder::class);
+
         // User::factory(10)->create();
 
         User::factory()->create([
