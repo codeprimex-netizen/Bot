@@ -138,6 +138,36 @@ use Throwable;
  * from `once()` is its `IN_FLIGHT` lease: the guarded operation here is a single atomic
  * database write, so there is no window in which a lease could be held, and introducing
  * one would add a way for a crashed worker to block a counter.
+ *
+ * ### Status after task 3.4: still on the primitive, deliberately not yet on `once()`
+ *
+ * `IdempotencyStore::once()` now exists and provides exactly the mode this needs —
+ * `IdempotencyOptions::transactional()`, which claims, runs and settles in **one**
+ * transaction and takes no lease. `QuotaNotifier` has moved onto it. This class has not,
+ * because two behaviours here would change, and neither may change silently:
+ *
+ * 1. **A non-replayable row in this namespace.** `replayOf()` reads a `FAILED` or
+ *    `IN_FLIGHT` row as *"already spent"* and returns a zero receipt — under-counting one
+ *    unit, which is recoverable, rather than risking the double count Property 4 forbids.
+ *    `once()` does the opposite: it reclaims such a row and **runs the operation**, because
+ *    for a generic side effect a failed attempt means nothing landed and dropping the work
+ *    is the worse error. Both readings are right for their own context; adopting `once()`
+ *    without an option that suppresses reclaim would weaken this one.
+ * 2. **The unique-violation fallback.** `consume()` answers a lost race with a receipt even
+ *    if the winner's row cannot be read; `once()` answers a lost race it cannot resolve with
+ *    a 409 (`OperationInFlightException`) — an exception the send pipeline does not expect
+ *    from an accounting call that happens *after* a confirmed send.
+ *
+ * A follow-up that collapses this onto `once()` must therefore: add an option to
+ * `IdempotencyOptions` that refuses to reclaim a non-replayable row (so reading one still
+ * means "already spent"); keep `IdempotencyMode::Transactional` so the ledger row and the
+ * increment stay in one transaction and no lease is taken; pass `forTenant($tenant)` and
+ * `keptFor($this->retentionDays())` so the row is written exactly as it is today; return
+ * the receipt built *inside* the operation on a fresh run and
+ * `QuotaConsumption::fromLedger()` on a replay (so `isReplay()` keeps its current meaning);
+ * decide explicitly what a 409 should become on the send path — most likely a defer, never
+ * a lost consume; and keep `Tests\Fixtures\Quota::ledgerCount()` at exactly one row per
+ * unit of work.
  */
 final class QuotaGuard
 {

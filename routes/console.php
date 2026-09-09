@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Console\Commands\PruneIdempotencyKeys;
 use App\Console\Commands\ResumeQuotaPausedWork;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -47,3 +48,27 @@ Schedule::command(ResumeQuotaPausedWork::class)
     ->withoutOverlapping(10)
     ->onOneServer()
     ->description('Resume QUOTA_PAUSED work whose plan allowance has returned');
+
+/*
+| Expired side-effect dedup keys are pruned hourly (Req 31.2 / NFR2).
+|
+| Hourly rather than every minute because retention is measured in *days*
+| (`wa.reliability.idempotency.retention_days`): an entry that becomes prunable at
+| 09:00 is no cheaper to delete at 09:01 than at 10:00, and the table is one of the
+| busiest on the platform — sweeping it 1 440 times a day would spend more on the
+| indexed scan than the deletes save.
+|
+| Retention correctness is not this schedule's business, and cannot be: the command
+| only ever deletes rows whose `expires_at` has passed, and **never** a row without
+| one, because deleting a completed key silently re-arms the side effect it recorded.
+| The horizon is chosen by whoever wrote the key.
+|
+| `withoutOverlapping()` and `onOneServer()` are optimisations, not the guarantee:
+| deletes are batched and keyed by primary key, so two concurrent runs delete disjoint
+| (or already-gone) rows regardless.
+*/
+Schedule::command(PruneIdempotencyKeys::class)
+    ->hourly()
+    ->withoutOverlapping(30)
+    ->onOneServer()
+    ->description('Prune expired idempotency keys (never a key with no expiry)');

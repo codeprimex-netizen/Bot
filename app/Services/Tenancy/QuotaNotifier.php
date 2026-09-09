@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace App\Services\Tenancy;
 
-use App\Enums\IdempotencyState;
 use App\Enums\QuotaKind;
 use App\Events\Tenancy\TenantQuotaExhausted;
 use App\Events\Tenancy\TenantQuotaRestored;
-use App\Models\IdempotencyKey;
 use App\Models\QuotaHold;
 use App\Models\Tenant;
+use App\Services\Reliability\IdempotencyOptions;
+use App\Services\Reliability\IdempotencyStore;
 use Illuminate\Contracts\Events\Dispatcher;
 
 /**
@@ -30,8 +30,8 @@ use Illuminate\Contracts\Events\Dispatcher;
  * is sent, keyed by `(tenant, quota kind, period, event)`, and only the claim winner
  * dispatches.
  *
- * The claim is a row in `idempotency_keys` written with `INSERT ... IGNORE`, which makes
- * the deduplication:
+ * The claim is `IdempotencyStore::once()` in `IdempotencyMode::AtMostOnce` — a row in
+ * `idempotency_keys` written with `INSERT ... IGNORE` — which makes the deduplication:
  *
  * - **durable** — it survives a worker restart and a cache flush, unlike a cache marker.
  *   That matters because the window being deduplicated is up to a month long;
@@ -43,8 +43,12 @@ use Illuminate\Contracts\Events\Dispatcher;
  *   must outlive the longest period, a month, or a tenant could be told twice about the
  *   same period).
  *
- * It reuses the primitive `QuotaGuard::consume()` already deduplicates on, in the same
- * shape, so task 3.4's `IdempotencyStore::once()` takes both over unchanged.
+ * The mode matters, and it is chosen deliberately: **no lease**. A lease exists so that a
+ * crashed worker's key can be retried, and retrying is exactly what must not happen here —
+ * a duplicate notice is spam that teaches the tenant to ignore the channel Req 3.4 depends
+ * on, while a missed one is a nuisance. So the key is burned before the event is
+ * dispatched, and a failure is never retried
+ * (`IdempotencyMode::AtMostOnce::burnsKeyBeforeExecution()`).
  *
  * ## Events, because the inbox is task 29.2
  *
@@ -69,7 +73,10 @@ final readonly class QuotaNotifier
 
     public const string EVENT_RESTORED = 'restored';
 
-    public function __construct(private Dispatcher $events) {}
+    public function __construct(
+        private Dispatcher $events,
+        private IdempotencyStore $store,
+    ) {}
 
     /**
      * Tell $tenant that $verdict stopped their work — at most once for this quota and
@@ -168,32 +175,28 @@ final readonly class QuotaNotifier
      * Claim the right to send one notice: `INSERT ... IGNORE` on `uniq(scope, key)`.
      *
      * True exactly once per key, across every worker and every restart.
+     *
+     * The operation handed to the store is pure — it only names the payload that is
+     * recorded as the claim's `result` — because the *notice itself* is dispatched by the
+     * caller after this returns true. Keeping the dispatch outside is what makes the order
+     * "claim, then tell" rather than "tell, then hope the claim sticks", and it means the
+     * at-most-once mode's one sharp edge (an operation that throws is never retried) has
+     * nothing to bite: there is nothing here that can fail.
      */
     private function claim(Tenant $tenant, QuotaKind $kind, string $periodKey, string $event, string $message): bool
     {
-        $now = now();
-        $result = ['event' => $event, 'quota' => $kind->value, 'period_key' => $periodKey, 'message' => $message];
+        $notice = ['event' => $event, 'quota' => $kind->value, 'period_key' => $periodKey, 'message' => $message];
 
-        // Written through the query builder rather than `create()`: the insert must be
-        // *ignored* on conflict, not raise, so the caller needs no exception handling and
-        // there is no read-then-write window. That means timestamps, the enum value and
-        // the JSON column are supplied explicitly here.
-        $inserted = IdempotencyKey::query()->insertOrIgnore([
-            'tenant_id' => $tenant->id,
-            'scope' => $this->noticeScope($tenant, $kind),
-            'key' => $this->noticeKey($event, $periodKey),
-            'state' => IdempotencyState::Completed->value,
-            'result' => json_encode($result),
-            'response_hash' => IdempotencyKey::fingerprint($result),
-            'completed_at' => $now,
-            // Must outlive the longest period (a month) or the same period could be
-            // announced twice.
-            'expires_at' => $now->copy()->addDays($this->retentionDays()),
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        return $inserted > 0;
+        return $this->store->once(
+            $this->noticeScope($tenant, $kind),
+            $this->noticeKey($event, $periodKey),
+            static fn (): array => $notice,
+            IdempotencyOptions::atMostOnce()
+                ->forTenant($tenant)
+                // Must outlive the longest period (a month) or the same period could be
+                // announced twice.
+                ->keptFor($this->retentionDays()),
+        )->wasExecuted();
     }
 
     /**

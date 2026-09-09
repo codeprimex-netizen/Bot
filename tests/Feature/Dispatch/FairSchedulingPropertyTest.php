@@ -168,20 +168,55 @@ it('gives a skipped tenant its normal share back, and no more, once it clears', 
 
         $totalWeight = array_sum($weights);
 
+        // This second window starts on a *warm* ledger, which is the whole point of the
+        // scenario and which sets the bound that applies to it. The tenants that were
+        // dispatched while their neighbour sat out ended that window carrying up to
+        // `max_carry_quanta` quanta of unspent credit, so they enter this one already in
+        // funds — and design.md's error term is stated for exactly that case:
+        // `(1 + max_carry_quanta) × quantum(t)`. It is the same constant the multi-worker
+        // bound below uses, and the reason the one-quantum bound in the first test of this
+        // file is legitimate *there* is that its ledger starts cold.
+        $carryBound = 1 + (int) config('wa.dispatch.fair.max_carry_quanta');
+
         foreach ($tenants as $index => $tenant) {
             $expected = $budget * $weights[$index] / $totalWeight;
+            $actual = $afterCap->unitsFor($tenant);
 
-            // Back to proportional immediately — the cap did not hand the tenant's share
-            // to the others permanently, and it did not earn the tenant a catch-up burst
-            // either (its credit was frozen while capped, not accumulated).
-            expect(abs($afterCap->unitsFor($tenant) - $expected))->toBeLessThanOrEqual(
-                $weights[$index],
+            // Back to proportional immediately: the cap did not hand the skipped tenant's
+            // share to the others permanently.
+            expect(abs($actual - $expected))->toBeLessThanOrEqual(
+                $carryBound * $weights[$index],
                 sprintf(
                     'iteration %d: tenant %d got %d of %d units after its cap lifted (expected ~%.2f)',
                     $iteration,
                     $index,
-                    $afterCap->unitsFor($tenant),
+                    $actual,
                     $budget,
+                    $expected,
+                ),
+            );
+
+            if ($index !== $capped) {
+                continue;
+            }
+
+            // …and the "no more" half of this test's name, which is a *tighter* claim than
+            // the bound above rather than a weaker one. The skipped tenant is the one lane
+            // that provably enters this window on zero credit — `retain()` keeps an
+            // ineligible tenant's credit untouched, and an ineligible tenant is never
+            // credited, so being capped froze its entitlement instead of accruing it. A
+            // lane starting at zero cannot be carrying a hoard, so it cannot overshoot by
+            // more than the single quantum this round grants it. If a skipped tenant ever
+            // did accumulate while capped, this is the assertion that fails: it would come
+            // back with a burst, and the burst would land here first.
+            expect($actual - $expected)->toBeLessThanOrEqual(
+                $weights[$index],
+                sprintf(
+                    'iteration %d: tenant %d took a catch-up burst of %d units (expected ~%.2f) '
+                    .'after being capped, so its credit accumulated while it was skipped',
+                    $iteration,
+                    $index,
+                    $actual,
                     $expected,
                 ),
             );
