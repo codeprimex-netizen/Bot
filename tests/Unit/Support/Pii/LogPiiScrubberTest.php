@@ -62,6 +62,50 @@ it('does not hash a digest a second time', function (): void {
     expect($twice['body'])->toBe($once['body']);
 });
 
+it('records a digest, a ULID, and a correlation id verbatim', function (): void {
+    // The bare-phone detector is `\d{7,15}` with digit boundaries, and hex digests and
+    // base32 ids are full of digit runs separated by letters — so roughly one digest in
+    // ten used to come out mangled (`…8f56*****94f41***28d`), destroying the evidence the
+    // line exists for. Data-dependent, so it read as flakiness rather than a rule.
+    $digest = 'ffdee58e35234afe735771fb59cd9abd9482b11c160b8f567743194f4164128d';
+
+    $scrubbed = scrubber()->scrubPayload([
+        'content_hash' => $digest,
+        'subject_hash' => hash('sha256', 'subject'),
+        'trace_id' => '01HX9M0123456789ABCDEFGHJK',
+        'checksum' => 'crc32:1234567890abc',
+        'session_key' => 'sess_01hx9m',
+    ]);
+
+    expect($scrubbed['content_hash'])->toBe($digest)
+        ->and($scrubbed['subject_hash'])->toBe(hash('sha256', 'subject'))
+        ->and($scrubbed['trace_id'])->toBe('01HX9M0123456789ABCDEFGHJK')
+        ->and($scrubbed['checksum'])->toBe('crc32:1234567890abc')
+        ->and($scrubbed['session_key'])->toBe('sess_01hx9m');
+});
+
+it('does not let an identifier key become a way to log PII', function (): void {
+    $scrubbed = scrubber()->scrubPayload([
+        // All digits: no letter, so the opaque exemption does not apply and the phone
+        // detector still gets it.
+        'customer_id' => '919876543210',
+        // Structure the exemption does not accept.
+        'external_id' => 'jane.doe@example.com',
+        // An identity key wins over the opaque rule, whatever the value looks like.
+        'wa_id' => '919876543210@s.whatsapp.net',
+        // A caller-supplied key is not an opaque platform identifier: exempting every
+        // `*_key` would turn a client-controlled field into a way to log a phone number.
+        'idempotency_key' => 'msg-919876543210',
+        'dedup_key' => 'evt-14155552671',
+    ]);
+
+    expect($scrubbed['customer_id'])->toBe('91********10')
+        ->and($scrubbed['external_id'])->toBe('j***@example.com')
+        ->and($scrubbed['wa_id'])->not->toContain('919876543210')
+        ->and($scrubbed['idempotency_key'])->not->toContain('919876543210')
+        ->and($scrubbed['dedup_key'])->not->toContain('14155552671');
+});
+
 it('drops a secret whatever its value looks like', function (): void {
     $scrubbed = scrubber()->scrubPayload([
         'api_key' => 'sk-live-1234',

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Services\Tenancy\Resolvers;
 
 use App\Enums\TenantResolutionSource;
-use App\Models\Tenant;
 use App\Services\Tenancy\TenantResolution;
 use App\Services\Tenancy\TenantResolver;
 use App\Services\Tenancy\TenantTokenRepository;
@@ -23,6 +22,11 @@ use Illuminate\Http\Request;
  * A malformed, unknown, revoked, or expired token resolves to *no tenant* — the
  * request then continues unauthenticated and is refused by the API's auth
  * middleware, rather than silently acting inside somebody else's account.
+ *
+ * A successful resolution carries the verified credential (`ApiTokenIdentity`) on the
+ * resolution, so `ResolveTenant` can publish it and `EnsurePermission` can check the
+ * key's scopes without re-verifying it. Resolution itself still only *identifies*: a
+ * key with no scopes resolves its tenant and is then refused by every scope gate.
  */
 final readonly class ApiTokenTenantResolver implements TenantResolver
 {
@@ -36,11 +40,11 @@ final readonly class ApiTokenTenantResolver implements TenantResolver
             return null;
         }
 
-        $tenant = $this->tokens->tenantForToken($plainTextToken);
+        $identity = $this->tokens->resolve($plainTextToken);
 
-        return $tenant instanceof Tenant
-            ? new TenantResolution($tenant, TenantResolutionSource::ApiToken)
-            : null;
+        return $identity === null
+            ? null
+            : new TenantResolution($identity->tenant, TenantResolutionSource::ApiToken, $identity);
     }
 
     /**

@@ -380,7 +380,7 @@ it('leaves the explicit read hatches, resolution, and tenant-root reads working'
     // it is the code that decides who is acting.
     $context->forget();
 
-    expect(app(App\Services\Tenancy\TenantTokenRepository::class)->tenantForToken($issued->plainText)?->id)
+    expect(app(App\Services\Tenancy\TenantTokenRepository::class)->resolve($issued->plainText)?->tenant->id)
         ->toBe($globex->id)
         ->and(TenantUser::query()->where('user_id', $globex->tenantUsers()->firstOrFail()->user_id)->count())->toBe(1)
         // Reading a tenant's own children from an unbound context (console, scheduler,

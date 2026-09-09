@@ -1328,6 +1328,31 @@ return [
 
         /*
         |----------------------------------------------------------------------
+        | Vector-store tenant isolation (Req 32.1 / NFR3 — Correctness Property 20)
+        |----------------------------------------------------------------------
+        | The STRIDE row for the vector store is *"payload filter `tenant_id` on every
+        | query; per-tenant namespaces"*. Both halves live in
+        | `App\Services\Chatbot\Rag\VectorFilter` — the filter because it is the type
+        | `VectorStore`'s methods accept (so an unfiltered query does not compile), the
+        | namespace because two drivers must not invent two namings for one tenant.
+        |
+        | There is deliberately **no switch here for either of them**. An external ANN
+        | index has no equivalent of `TenantScope`: a query that omits the tenant term
+        | returns other tenants' neighbours silently, with a plausible answer and no
+        | error, so "filter by tenant" cannot be an operator preference. The only knob
+        | is what the per-tenant namespace is called.
+        |
+        | Driver selection, endpoints, and credentials belong to task 13.2 and land in
+        | their own config section — this section is the isolation contract, nothing else.
+        */
+        'vector' => [
+            // Prefix of a tenant's collection/namespace: `{prefix}_{tenantId}`. Change it
+            // only alongside a re-index — existing vectors do not move themselves.
+            'namespace_prefix' => env('WA_VECTOR_NAMESPACE_PREFIX', 'wacb'),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
         | PII redaction (Req 7.3 / A7; Req 32.2 / NFR3 — Correctness Property 15)
         |----------------------------------------------------------------------
         | Two consumers, one definition of what PII is (`App\Support\Pii\PiiScanner`):

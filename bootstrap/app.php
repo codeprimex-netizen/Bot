@@ -3,8 +3,10 @@
 declare(strict_types=1);
 
 use App\Exceptions\Billing\FeatureNotInPlanException;
+use App\Exceptions\Security\PermissionDeniedException;
 use App\Exceptions\Tenancy\CrossTenantAccessException;
 use App\Exceptions\Tenancy\QuotaExceededException;
+use App\Http\Middleware\EnsurePermission;
 use App\Http\Middleware\EnsurePlanFeature;
 use App\Http\Middleware\ResolveTenant;
 use Illuminate\Foundation\Application;
@@ -28,6 +30,12 @@ return Application::configure(basePath: dirname(__DIR__))
             // resolve.tenant: `plan.feature:ai`, or `plan.feature:flows,integrations`
             // to require several.
             'plan.feature' => EnsurePlanFeature::class,
+            // RBAC + API-key scope (Req 32.1 / NFR3; STRIDE rows "Panels" and
+            // "Public API"). Stacks *after* resolve.tenant (and after `auth` on panel
+            // routes): `tenant.permission:campaigns.manage`, or a comma-separated list
+            // to require several. A panel caller is checked against their role, an API
+            // caller against the scopes its key was issued with.
+            'tenant.permission' => EnsurePermission::class,
         ]);
 
         // Appended (not prepended) so it runs after StartSession and can read
@@ -53,6 +61,24 @@ return Application::configure(basePath: dirname(__DIR__))
                 'message' => $e->publicMessage(),
                 'error' => CrossTenantAccessException::ERROR_CODE,
             ], CrossTenantAccessException::STATUS);
+        });
+
+        // Req 32.1 / NFR3: a caller without the permission — a role that does not carry
+        // it, or an API key not issued for it — is a 403 on every surface. The envelope
+        // carries the permission key (it came from the route the caller already reached,
+        // so it reveals nothing new) but never *why* it was refused: "not a member" and
+        // "member without the role" must be indistinguishable, or the 403 becomes a
+        // membership oracle.
+        $exceptions->render(function (PermissionDeniedException $e, Request $request): ?JsonResponse {
+            if (! $request->expectsJson()) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->publicMessage(),
+                'error' => $e->errorCode(),
+                'permission' => $e->permission->value,
+            ], PermissionDeniedException::STATUS);
         });
 
         // Req 11.3 / B2, Req 22.2 / C5: a feature the tenant's plan does not include is

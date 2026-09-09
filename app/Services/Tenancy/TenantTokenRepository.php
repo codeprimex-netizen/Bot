@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Tenancy;
 
-use App\Models\Tenant;
-
 /**
- * Maps a presented API token to the single tenant that owns it.
+ * Verifies a presented API token and reports **who it is and what it may do**.
  *
  * Extracted as a contract so the token store is swappable: the default
  * implementation reads the platform's own `tenant_api_tokens` table, and when
@@ -17,8 +15,15 @@ use App\Models\Tenant;
  *
  * Implementations MUST return `null` for anything they cannot positively verify
  * (malformed, unknown, revoked, or expired), never a best guess.
+ *
+ * Task 4.6 widened the return value from a bare `Tenant` to `ApiTokenIdentity`, so the
+ * credential's scopes travel with the credential that was verified. The alternative —
+ * resolving the tenant here and re-reading the scopes in the authorization middleware —
+ * verifies the same credential in two places, and two verifiers eventually disagree.
+ * An implementation therefore also has to report the scopes it stored; returning an
+ * empty scope list is legal and means the key may do nothing.
  */
 interface TenantTokenRepository
 {
-    public function tenantForToken(string $plainTextToken): ?Tenant;
+    public function resolve(string $plainTextToken): ?ApiTokenIdentity;
 }

@@ -18,10 +18,15 @@ use App\Models\TenantApiToken;
  * tenant the caller is. It therefore states the bypass explicitly with
  * `withoutTenantScope()` (Req 1.2 / A1) — the lookup is still narrowed to a single
  * row by the token hash, and the tenant it returns is the one that owns that row.
+ *
+ * The row's `scopes` are read on the same pass and returned inside the identity, so the
+ * key is verified exactly once (task 4.6). A key with no scopes still resolves its
+ * tenant — resolution is identification, not authorization — and is then refused by
+ * every scope gate.
  */
 final class DatabaseTenantTokenRepository implements TenantTokenRepository
 {
-    public function tenantForToken(string $plainTextToken): ?Tenant
+    public function resolve(string $plainTextToken): ?ApiTokenIdentity
     {
         [$id, $secret] = TenantApiToken::splitPlainText($plainTextToken);
 
@@ -49,6 +54,6 @@ final class DatabaseTenantTokenRepository implements TenantTokenRepository
 
         $token->markUsed();
 
-        return $tenant;
+        return ApiTokenIdentity::fromToken($token, $tenant);
     }
 }

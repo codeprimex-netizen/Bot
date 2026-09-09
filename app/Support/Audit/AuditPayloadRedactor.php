@@ -116,6 +116,15 @@ final class AuditPayloadRedactor
                 : $this->maskNumbers($value);
         }
 
+        if (is_string($value) && PiiKeyRules::isOpaqueIdentifier($key, $value)) {
+            // A digest, ULID, or correlation id, recorded verbatim — the same exemption
+            // `LogPiiScrubber` applies, from the same shared rule, so an entry's
+            // `content_hash` cannot be masked in the audit trail and intact in the log
+            // (or the reverse). See `PiiKeyRules::OPAQUE_KEY_PATTERN` for why the
+            // exemption is safe and why it is checked last.
+            return $value;
+        }
+
         return $this->walk($value);
     }
 

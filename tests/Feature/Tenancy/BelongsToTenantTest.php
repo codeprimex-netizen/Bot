@@ -262,7 +262,7 @@ it('keeps tenant resolution working, because the token lookup declares its bypas
     // No tenant bound: this is exactly the state tenant resolution runs in.
     expect(app(TenantContext::class)->hasTenant())->toBeFalse();
 
-    $resolved = app(TenantTokenRepository::class)->tenantForToken($issued->plainText);
+    $resolved = app(TenantTokenRepository::class)->resolve($issued->plainText);
 
-    expect($resolved?->id)->toBe($acme->id);
+    expect($resolved?->tenant->id)->toBe($acme->id);
 });

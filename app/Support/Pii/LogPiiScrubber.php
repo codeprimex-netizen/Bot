@@ -140,6 +140,14 @@ final class LogPiiScrubber
                 : $this->scrub($this->truncate($value));
         }
 
+        if (is_string($value) && PiiKeyRules::isOpaqueIdentifier($key, $value)) {
+            // A digest, ULID, or correlation id, recorded verbatim: the bare-phone
+            // detector matches digit runs inside hex and base32, so scanning these
+            // corrupted roughly one in ten of them and destroyed the evidence the line
+            // exists for. Checked last, so the secret, content, and identity rules win.
+            return $this->truncate($value);
+        }
+
         return $this->walk($value, $depth + 1);
     }
 
