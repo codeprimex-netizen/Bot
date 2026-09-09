@@ -2,7 +2,10 @@
 
 declare(strict_types=1);
 
+use App\Exceptions\Billing\FeatureNotInPlanException;
 use App\Exceptions\Tenancy\CrossTenantAccessException;
+use App\Exceptions\Tenancy\QuotaExceededException;
+use App\Http\Middleware\EnsurePlanFeature;
 use App\Http\Middleware\ResolveTenant;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -21,6 +24,10 @@ return Application::configure(basePath: dirname(__DIR__))
         // membership, plan, and quota gates on top of it.
         $middleware->alias([
             'resolve.tenant' => ResolveTenant::class,
+            // Plan feature gating (Req 11.3 / B2, Req 22.2 / C5). Stacks *after*
+            // resolve.tenant: `plan.feature:ai`, or `plan.feature:flows,integrations`
+            // to require several.
+            'plan.feature' => EnsurePlanFeature::class,
         ]);
 
         // Appended (not prepended) so it runs after StartSession and can read
@@ -46,5 +53,53 @@ return Application::configure(basePath: dirname(__DIR__))
                 'message' => $e->publicMessage(),
                 'error' => CrossTenantAccessException::ERROR_CODE,
             ], CrossTenantAccessException::STATUS);
+        });
+
+        // Req 11.3 / B2, Req 22.2 / C5: a feature the tenant's plan does not include is
+        // a 402 when a higher active plan sells it ("upgrade") and a 403 when nothing
+        // does ("not permitted") — see FeatureNotInPlanException for the rule. The
+        // feature key and the upgrade targets are public catalogue data, so the envelope
+        // carries them: without them the panel cannot render an actionable CTA.
+        $exceptions->render(function (FeatureNotInPlanException $e, Request $request): ?JsonResponse {
+            if (! $request->expectsJson()) {
+                return null;
+            }
+
+            $payload = [
+                'message' => $e->publicMessage(),
+                'error' => $e->errorCode(),
+                'feature' => $e->feature->value,
+            ];
+
+            if ($e->upgradePlans !== []) {
+                $payload['upgrade_plans'] = $e->upgradePlans;
+            }
+
+            return response()->json($payload, $e->getStatusCode());
+        });
+
+        // Req 3.4 / A3: an exhausted allowance defers or blocks, and either way the tenant
+        // is *told* — never silently dropped. The envelope carries the quota, the outcome
+        // and (for a deferrable refusal) the wait, so a client can back off with the same
+        // number the queue releases a job with. `Retry-After` comes from the exception's
+        // own headers, so header and body cannot disagree.
+        $exceptions->render(function (QuotaExceededException $e, Request $request): ?JsonResponse {
+            if (! $request->expectsJson()) {
+                return null;
+            }
+
+            $payload = [
+                'message' => $e->publicMessage(),
+                'error' => $e->errorCode(),
+                'quota' => $e->verdict->kind->value,
+                'outcome' => $e->verdict->outcome()->value,
+                'reason' => $e->verdict->reason->value,
+            ];
+
+            if ($e->retryAfterSeconds() !== null) {
+                $payload['retry_after'] = $e->retryAfterSeconds();
+            }
+
+            return response()->json($payload, $e->getStatusCode(), $e->getHeaders());
         });
     })->create();

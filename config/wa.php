@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use App\Enums\QuotaKind;
 use App\Enums\TenantTier;
+use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
 use App\Services\Security\ConfigMasterKeyWrapper;
 use App\Services\Tenancy\Provisioning\Steps\AssignOwnerMembershipStep;
 use App\Services\Tenancy\Provisioning\Steps\AssignSeedPlanStep;
@@ -255,6 +257,129 @@ return [
                 'prefix' => 'tenancy:tier',
             ],
         ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Quota metering (Req 3.4, 3.5 / A3)
+        |----------------------------------------------------------------------
+        | `App\Services\Tenancy\QuotaGuard` is the only reader. Nothing here is a
+        | ceiling: **allowances live in `plans.limits`** and nowhere else, and no
+        | value below can raise, lower, or bypass one. These are the mechanics of
+        | counting — how consumption is serialized, and how long the consume-once
+        | ledger is kept.
+        */
+        'quota' => [
+            /*
+            |------------------------------------------------------------------
+            | Per-counter lock: `quota:{tenant}:{kind}`
+            |------------------------------------------------------------------
+            | Serializes concurrent consumption of one counter so the ceiling check
+            | and the increment are one step. It is a *fast path*, not the
+            | correctness guarantee — `uniq(scope, key)` on `idempotency_keys`, the
+            | `used = used + n` SQL increment, and the unsigned column hold on their
+            | own (Correctness Property 4). A store without lock support, or a wait
+            | that times out, therefore proceeds **unlocked** rather than refusing:
+            | the send has already happened and declining to record it would lose
+            | usage. See `QuotaGuard` for the bounded cost.
+            */
+            'lock' => [
+                'store' => env('WA_QUOTA_LOCK_STORE'),
+                'seconds' => (int) env('WA_QUOTA_LOCK_SECONDS', 10),
+                'wait_seconds' => (int) env('WA_QUOTA_LOCK_WAIT_SECONDS', 5),
+            ],
+
+            // `idempotency_keys.scope` prefix for consume-once entries, which are
+            // written as `{prefix}:{tenantId}:{QUOTA_KIND}`. Task 3.4's
+            // `IdempotencyStore::once()` takes over these rows unchanged.
+            'scope_prefix' => 'quota',
+
+            // How long a consume-once entry is kept. Must comfortably outlive the
+            // longest bucket (a month) or a late retry would no longer be
+            // recognised as a duplicate and would consume a second time.
+            'retention_days' => (int) env('WA_QUOTA_RETENTION_DAYS', 45),
+
+            /*
+            |------------------------------------------------------------------
+            | Quota-paused work (Req 20.3 / C3, Req 31.1 / NFR2)
+            |------------------------------------------------------------------
+            | Work refused by a *deferrable* verdict is parked in `quota_holds`
+            | (`QUOTA_PAUSED`) and handed back when the allowance returns — at the
+            | next period reset, or immediately after an upgrade/top-up. The
+            | scheduled sweep is `wa:quota:resume-paused`, registered in
+            | `routes/console.php`; see `App\Services\Tenancy\QuotaParkingLot`.
+            */
+            'holds' => [
+                /*
+                | Who hands each kind of parked work back: `{key} => QuotaResumer`.
+                | The key is what `QuotaHoldSubject::for($work, resumer: 'campaign')`
+                | records on the hold, and adding a subsystem is exactly this one
+                | line plus one `resume()` method:
+                |
+                |   - task 26.2 — 'campaign' => CampaignQuotaResumer::class
+                |   - task 26.5 — 'import'   => ContactImportQuotaResumer::class
+                |   - task 27.x — 'sequence' => SequenceQuotaResumer::class
+                |
+                | A hold with no resumer is handed back by the `QuotaHoldResumed`
+                | event alone, which is enough for an owner that re-reads its own
+                | state. A hold naming a key that is *not* registered here stays
+                | paused with the error recorded — never silently resumed, because
+                | that would drop the work (Req 31.1).
+                */
+                'resumers' => [
+                ],
+
+                // Holds considered per sweep. The sweep runs every minute, so this is
+                // a fairness/latency knob rather than a cap on throughput: a backlog
+                // drains over successive ticks instead of in one long transaction.
+                'batch' => (int) env('WA_QUOTA_RESUME_BATCH', 200),
+
+                // How long a `RESUMING` claim is honoured before another worker may
+                // retake it. A worker killed mid-hand-back delays its hold by this
+                // much; retaking a *live* claim would risk resuming the same campaign
+                // twice, which is the worse failure.
+                'lease_seconds' => (int) env('WA_QUOTA_RESUME_LEASE_SECONDS', 300),
+
+                // How long to wait before re-checking a hold whose refusal has stopped
+                // being transient (a downgrade, a limit edited to 0). Such work is
+                // never auto-resumed by the clock — an upgrade or top-up pulls it
+                // forward — so this only bounds how stale the recorded reason gets.
+                'blocked_recheck_seconds' => (int) env('WA_QUOTA_BLOCKED_RECHECK_SECONDS', 3600),
+
+                // Base backoff after a failed hand-back, multiplied by the attempt
+                // count. A broken resumer therefore backs off instead of retrying
+                // every minute for a month, and a fixed deployment recovers promptly.
+                'failure_backoff_seconds' => (int) env('WA_QUOTA_RESUME_BACKOFF_SECONDS', 300),
+
+                // How long *finished* holds are kept for the audit/operator trail.
+                // Open holds are never pruned at any age: they are work somebody is
+                // still owed.
+                'retention_days' => (int) env('WA_QUOTA_HOLD_RETENTION_DAYS', 30),
+            ],
+
+            /*
+            |------------------------------------------------------------------
+            | Telling the tenant (Req 3.4 / A3 — "and notify the tenant")
+            |------------------------------------------------------------------
+            | `QuotaNotifier` dispatches `TenantQuotaExhausted` / `TenantQuotaRestored`
+            | **once per tenant per quota per period** — not once per refused job. The
+            | notifications inbox (task 29.2) subscribes; nothing in the quota layer
+            | knows a mailbox exists.
+            */
+            'notify' => [
+                // False parks and resumes work exactly as before but tells nobody —
+                // for a load test or a migration replay, never for production.
+                'enabled' => (bool) env('WA_QUOTA_NOTIFY', true),
+
+                // `idempotency_keys.scope` prefix the "told once" claims are written
+                // under: `{prefix}:{tenantId}:{QUOTA_KIND}`.
+                'scope_prefix' => 'quota-notice',
+
+                // How long a claim is kept. Floored at 32 days in code: shorter than
+                // the longest period (a month) and the same period could be announced
+                // twice.
+                'retention_days' => (int) env('WA_QUOTA_NOTICE_RETENTION_DAYS', 45),
+            ],
+        ],
     ],
 
     /*
@@ -358,24 +483,46 @@ return [
         | code** and is deliberately absent from this list: "a suspended tenant is
         | not dispatched" is not a tunable.
         |
-        | Empty is the correct value today — the caps that would go here do not
-        | exist yet. Each owning task adds its own gate:
+        | Each owning task adds its own gate:
         |
-        |   - task 2.3  — a `QuotaGuard`-backed gate (verdict/remaining only; this
-        |                 question is asked speculatively and must never *consume*).
+        |   - task 2.3 (done) — `Eligibility\QuotaDispatchEligibility`: has the
+        |                 tenant any allowance left? Reads `QuotaGuard::verdict()`
+        |                 only — the question is asked speculatively and must never
+        |                 *consume*.
         |   - task 9.6  — the anti-ban gate: per-minute/hour/day pacing, warm-up
         |                 caps, quiet hours.
         |   - task 36.5 — per-tenant in-flight AI concurrency cap (the second half
         |                 of Req 30.6).
         |
-        | A gate must only ever withhold work for a reason that *clears by itself*:
-        | a skip means "later", so a permanent refusal belongs at the send gate
-        | where the tenant sees an error. An entry that cannot be resolved is fatal
-        | (`InvalidDispatchGateException`) — a silently skipped gate is a silently
-        | removed cap.
+        | A gate must only ever withhold work for a reason that clears by itself or
+        | by an operator action: a skip means "later", so a refusal that nothing can
+        | ever lift belongs at the send gate where the tenant sees an error. An
+        | entry that cannot be resolved is fatal (`InvalidDispatchGateException`) —
+        | a silently skipped gate is a silently removed cap.
         */
         'eligibility' => [
-            'gates' => [],
+            'gates' => [
+                QuotaDispatchEligibility::class,
+            ],
+
+            /*
+            |------------------------------------------------------------------
+            | Which quotas pace dispatch
+            |------------------------------------------------------------------
+            | The kinds `QuotaDispatchEligibility` requires one free unit of before
+            | a tenant enters the rotation. Message counters do pace throughput;
+            | `AI_CREDITS` deliberately does not (an exhausted AI allowance must not
+            | stop plain outbound messages — task 36.5 gates AI work on its own),
+            | and the gauges do not either, since they cap *creation* rather than
+            | sending. An empty list disables quota-aware dispatch without removing
+            | the gate; the send gate still enforces every kind either way.
+            */
+            'quota' => [
+                'kinds' => [
+                    QuotaKind::MessagesMonthly->value,
+                    QuotaKind::MessagesDaily->value,
+                ],
+            ],
         ],
     ],
 

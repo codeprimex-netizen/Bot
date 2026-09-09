@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Fixtures;
 
+use App\Models\Plan;
 use App\Models\Tenant;
 use App\Models\TenantTierAssignment;
 use App\Services\Dispatch\DeficitLedger;
@@ -38,15 +39,22 @@ final class Dispatch
      * tests exercise the same path a real weight change takes — including the resolver
      * cache invalidation that write performs.
      *
+     * Every tenant is put on one shared **unlimited** plan, because the configured
+     * eligibility chain now includes `QuotaDispatchEligibility` (task 2.3) and a tenant
+     * with no plan has no allowance, so it would be skipped before weight ever came into
+     * it. These tests are about *shares*, not about caps: the quota gate has its own
+     * tests, and `FairSchedulerTest` pins the skipping behaviour with an explicit gate.
+     *
      * @param  list<int>  $weights
      * @return list<Tenant>
      */
     public static function tenantsWeighted(array $weights): array
     {
         $tenants = [];
+        $plan = Plan::factory()->unlimited()->create();
 
         foreach ($weights as $weight) {
-            $tenant = Tenant::factory()->create();
+            $tenant = Tenant::factory()->for($plan)->create();
             TenantTierAssignment::factory()->withLaneWeight($weight)->create(['tenant_id' => $tenant->id]);
             $tenants[] = $tenant;
         }

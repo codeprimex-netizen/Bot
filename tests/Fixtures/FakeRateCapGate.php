@@ -8,15 +8,15 @@ use App\Models\Tenant;
 use App\Services\Dispatch\DispatchEligibility;
 
 /**
- * A stand-in for the dispatch gates that do not exist yet — task 2.3's quota cap, task
- * 9.6's anti-ban pacing, task 36.5's in-flight AI concurrency cap.
+ * A stand-in for the dispatch gates that do not exist yet — task 9.6's anti-ban pacing,
+ * task 36.5's in-flight AI concurrency cap.
  *
  * It exists so the scheduler's *"skip a rate-capped tenant in the loop"* behaviour
  * (Req 30.6 / NFR1) can be tested against a cap that can be raised and lifted at will,
- * without inventing a quota subsystem. Bound only under `tests/`, through
- * `wa.dispatch.eligibility.gates` — production ships the real chain
- * (`Eligibility\CompositeDispatchEligibility`), whose only member today is the
- * suspension gate.
+ * from a test that is about scheduling rather than about any particular cap. Bound only
+ * under `tests/`, through `wa.dispatch.eligibility.gates` — production ships the real
+ * chain (`Eligibility\CompositeDispatchEligibility`): the mandatory suspension gate plus
+ * the quota gate task 2.3 added.
  *
  * The capped set is static because the container resolves this gate itself: a test
  * changes the cap without holding a reference to the instance the scheduler was given.

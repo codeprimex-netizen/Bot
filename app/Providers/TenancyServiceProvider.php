@@ -11,6 +11,10 @@ use App\Services\Tenancy\AuditedTenantLifecycle;
 use App\Services\Tenancy\ConfiguredTierResolver;
 use App\Services\Tenancy\DatabaseTenantTokenRepository;
 use App\Services\Tenancy\Provisioning\TenantProvisioningStepRegistry;
+use App\Services\Tenancy\QuotaGuard;
+use App\Services\Tenancy\QuotaNotifier;
+use App\Services\Tenancy\QuotaParkingLot;
+use App\Services\Tenancy\QuotaResumerRegistry;
 use App\Services\Tenancy\RequestTenantContext;
 use App\Services\Tenancy\Resolvers\ChainTenantResolver;
 use App\Services\Tenancy\TenantContext;
@@ -64,6 +68,23 @@ class TenancyServiceProvider extends ServiceProvider
         // Stateless: it holds no per-tenant state of its own, and every guard on it is
         // a pure function of the tenant's status, so one instance serves every caller.
         $this->app->singleton(TenantLifecycle::class, AuditedTenantLifecycle::class);
+
+        // Also stateless, and asked constantly: every send takes a verdict and the
+        // dispatch loop takes one per candidate tenant per window (Req 3.4, 3.5 / A3).
+        // It caches nothing itself — the plan cache lives in `PlanRepository` and the
+        // counters live in `tenant_usage` — so a single instance carries no tenant's
+        // allowance into another's request.
+        $this->app->singleton(QuotaGuard::class);
+
+        // Quota-paused work: the parking lot, the resumer registry it resolves hand-back
+        // handlers through, and the notifier that tells the tenant (Req 3.4 / A3;
+        // Req 20.3 / C3). All three are stateless — every piece of state is a
+        // `quota_holds` row or an `idempotency_keys` claim — so one instance per process
+        // is safe, and the scheduled sweep reuses it across tenants without carrying
+        // anything between them.
+        $this->app->singleton(QuotaResumerRegistry::class);
+        $this->app->singleton(QuotaNotifier::class);
+        $this->app->singleton(QuotaParkingLot::class);
 
         $this->app->singleton(TenantResolver::class, function (Application $app): TenantResolver {
             return new ChainTenantResolver($this->configuredResolvers($app));

@@ -40,14 +40,14 @@ use App\Models\Tenant;
  * ## Who implements it
  *
  * `Eligibility\CompositeDispatchEligibility` is what the scheduler actually gets: it
- * ANDs together the suspension gate, which is real and enforced today, plus whatever
+ * ANDs together the suspension gate, which is mandatory in code, plus whatever
  * `wa.dispatch.eligibility.gates` adds. Later phases plug in here **by appending a
  * class to that config array** — no scheduler change, no call-site change:
  *
  * | Task | Gate it adds | Question it answers |
  * |---|---|---|
  * | 1.3 (done) | `Eligibility\LifecycleDispatchEligibility` | is the tenant suspended/cancelled? (`TenantLifecycle::canSendOutbound()`) |
- * | **2.3** | a `QuotaGuard`-backed gate | has the tenant any allowance left this period? Must use `QuotaGuard::verdict()`/`remaining()` — **never** `consume()`: this method is asked speculatively and must not spend quota. |
+ * | 2.3 (done) | `Eligibility\QuotaDispatchEligibility` | has the tenant any allowance left this period? Uses `QuotaGuard::verdict()` only — **never** `consume()`: this method is asked speculatively and must not spend quota. |
  * | **9.6** | an anti-ban gate | is the tenant inside its per-minute/hour/day pacing budget, its warm-up cap, or a quiet-hours window? |
  * | **36.5** | a per-tenant AI-concurrency gate | is this tenant already at its in-flight `ai-reply` cap? (the second half of Req 30.6) |
  *
