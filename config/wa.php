@@ -283,6 +283,104 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Weighted-fair dispatch (Req 1.7 / A1; Req 30.2, 30.6 / NFR1)
+    |--------------------------------------------------------------------------
+    | `App\Services\Dispatch\FairScheduler` shares each queue lane out across the
+    | tenants with pending work by **deficit round robin**, in proportion to the
+    | `lane_weight` that `TierResolver` resolves (see `tenancy.tiers` above). Every
+    | tenant's weight is at least 1, so no tenant can be starved; every tenant's
+    | share per round is capped, so no tenant can monopolise a lane however large
+    | its backlog (Correctness Property 19).
+    |
+    | The knobs below change the *granularity* of fairness, never who gets what:
+    | shares are set by weight and by weight alone.
+    */
+    'dispatch' => [
+        'fair' => [
+            // Units of work one weight point buys per round. A tenant's quantum is
+            // `lane_weight * quantum`, so raising this makes rounds coarser (fewer,
+            // larger claims per lane lock) without changing any tenant's share.
+            'quantum' => (int) env('WA_DISPATCH_QUANTUM', 1),
+
+            // Extra quanta of unspent credit a tenant may carry into later rounds —
+            // the burst allowance, and the constant in the noisy-neighbour error
+            // bound: a tenant gets at most `(1 + this) * quantum` units in one round.
+            // 0 is perfectly flat but never lets a tenant make up a fractional share
+            // it repeatedly missed.
+            'max_carry_quanta' => (int) env('WA_DISPATCH_MAX_CARRY_QUANTA', 1),
+
+            // Safety bound on crediting rounds inside a single claim, so a caller that
+            // asks for a very large budget cannot hold a lane's lock for long.
+            'max_rounds' => (int) env('WA_DISPATCH_MAX_ROUNDS', 1024),
+
+            /*
+            |------------------------------------------------------------------
+            | Deficit counters
+            |------------------------------------------------------------------
+            | Soft state: one cache entry per queue lane holding that lane's
+            | deficit counters and rotation cursor, claimed under a short lock so
+            | concurrent workers share one rotation instead of each running its
+            | own. Losing it (TTL, flush, a fresh Redis) restarts every lane from
+            | zero credit — fair, and no work is lost, because the work itself
+            | lives in the queue tables. Redis is the natural home for it after
+            | Req 30.3's drop-in upgrade (task 36.3); `store` is the only change.
+            */
+            'state' => [
+                'store' => env('WA_DISPATCH_STATE_STORE'),
+                'prefix' => 'dispatch:fair',
+
+                // Long enough to span an idle period between campaigns, short
+                // enough that a lane nobody dispatches on stops being remembered.
+                'ttl' => (int) env('WA_DISPATCH_STATE_TTL', 3600),
+
+                // Claim lock: how long it is held (the lock's own TTL is twice
+                // this) and how long a worker waits for it. On timeout the claim
+                // proceeds *unlocked* rather than refusing to dispatch — a
+                // momentarily imprecise share is a far better failure than a
+                // platform-wide send stall. See `CacheDeficitLedger`.
+                'lock_seconds' => (int) env('WA_DISPATCH_LOCK_SECONDS', 5),
+                'lock_wait_seconds' => (int) env('WA_DISPATCH_LOCK_WAIT_SECONDS', 3),
+            ],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Dispatch eligibility — "can this tenant be dispatched right now?"
+        |----------------------------------------------------------------------
+        | Quota-aware dispatch (Req 30.6 / NFR1): a tenant that cannot be
+        | dispatched is **skipped in the loop** rather than granted a share it
+        | would waste, and picked up again the moment it clears. Each gate below
+        | is one reason to skip, ANDed in order, and appending a class here is the
+        | entire cost of adding one — the scheduler does not change.
+        |
+        | The suspension gate (`Eligibility\LifecycleDispatchEligibility`,
+        | `TenantLifecycle::canSendOutbound()`) is applied **unconditionally in
+        | code** and is deliberately absent from this list: "a suspended tenant is
+        | not dispatched" is not a tunable.
+        |
+        | Empty is the correct value today — the caps that would go here do not
+        | exist yet. Each owning task adds its own gate:
+        |
+        |   - task 2.3  — a `QuotaGuard`-backed gate (verdict/remaining only; this
+        |                 question is asked speculatively and must never *consume*).
+        |   - task 9.6  — the anti-ban gate: per-minute/hour/day pacing, warm-up
+        |                 caps, quiet hours.
+        |   - task 36.5 — per-tenant in-flight AI concurrency cap (the second half
+        |                 of Req 30.6).
+        |
+        | A gate must only ever withhold work for a reason that *clears by itself*:
+        | a skip means "later", so a permanent refusal belongs at the send gate
+        | where the tenant sees an error. An entry that cannot be resolved is fatal
+        | (`InvalidDispatchGateException`) — a silently skipped gate is a silently
+        | removed cap.
+        */
+        'eligibility' => [
+            'gates' => [],
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Versioned caches (Req 30.4 / NFR1)
     |--------------------------------------------------------------------------
     | Hot reads go through `App\Support\Cache\VersionedCache`: entries live under
