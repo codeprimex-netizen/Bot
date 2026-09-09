@@ -77,7 +77,12 @@ class Tenant extends Model
     /**
      * Users who are members of this tenant, with their per-tenant role.
      *
-     * @return BelongsToMany<User, $this>
+     * The `TenantUser` / `'pivot'` template arguments are required as of
+     * Laravel 12: `BelongsToMany` gained `TPivotModel` and `TAccessor` template
+     * parameters, and `TPivotModel` is invariant — so a relation using a custom
+     * pivot must name it here rather than defaulting to the base `Pivot`.
+     *
+     * @return BelongsToMany<User, $this, TenantUser, 'pivot'>
      */
     public function users(): BelongsToMany
     {

@@ -2,25 +2,25 @@
     "$schema": "https://getcomposer.org/schema.json",
     "name": "wacb/platform",
     "type": "project",
-    "description": "WhatsApp Chatbot Platform — multi-tenant SaaS (Laravel 11 / PHP 8.3 / MySQL 8).",
+    "description": "WhatsApp Chatbot Platform — multi-tenant SaaS (Laravel 12 / PHP 8.3 / MySQL 8).",
     "keywords": ["whatsapp", "chatbot", "multi-tenant", "saas", "laravel"],
     "license": "proprietary",
     "require": {
         "php": "^8.3",
-        "laravel/framework": "^11.31",
-        "laravel/tinker": "^2.9"
+        "laravel/framework": "^12.60",
+        "laravel/tinker": "^2.10.1"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
         "larastan/larastan": "^3.0",
-        "laravel/pail": "^1.1",
-        "laravel/pint": "^1.13",
+        "laravel/pail": "^1.2.2",
+        "laravel/pint": "^1.24",
         "mockery/mockery": "^1.6",
-        "nunomaduro/collision": "^8.1",
-        "pestphp/pest": "^3.0",
-        "pestphp/pest-plugin-laravel": "^3.0",
+        "nunomaduro/collision": "^8.6",
+        "pestphp/pest": "^3.8",
+        "pestphp/pest-plugin-laravel": "^3.2",
         "phpstan/phpstan": "^2.0",
-        "phpunit/phpunit": "^11.0.1"
+        "phpunit/phpunit": "^11.5.3"
     },
     "autoload": {
         "psr-4": {
@@ -75,15 +75,6 @@
         "allow-plugins": {
             "pestphp/pest-plugin": true,
             "php-http/discovery": true
-        },
-        "policy": {
-            "advisories": {
-                "ignore-id": [
-                    "PKSA-mdq4-51ck-6kdq",
-                    "PKSA-m5cs-t1y6-qpcs",
-                    "PKSA-3r5d-mb8f-1qw9"
-                ]
-            }
         }
     },
     "minimum-stability": "stable",

@@ -6,7 +6,7 @@ PHP + MySQL based WhatsApp automation platform — multi-session, bulk/scheduled
 
 ## Status
 
-🏗️ **Build started —** Laravel 11 application bootstrapped; multi-tenant SaaS platform spec under implementation (Phase 0, Tenancy Foundation).
+🏗️ **Build started —** Laravel 12 application bootstrapped; multi-tenant SaaS platform spec under implementation (Phase 0, Tenancy Foundation).
 
 - [.kiro/specs/whatsapp-chatbot-platform/tasks.md](./.kiro/specs/whatsapp-chatbot-platform/tasks.md) — implementation plan currently being executed
 - [ROADMAP.md](./ROADMAP.md) — 31 phases, 7 milestones, timeline
@@ -19,7 +19,7 @@ PHP + MySQL based WhatsApp automation platform — multi-session, bulk/scheduled
 | Layer | Technology |
 |---|---|
 | Language | PHP 8.3 |
-| Framework | Laravel 11 |
+| Framework | Laravel 12 |
 | Database | MySQL 8.0 |
 | Queue | Laravel Queue — MySQL `jobs` table |
 | Cache / Locks | Laravel Cache — MySQL `cache` table |

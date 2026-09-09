@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document designs a **multi-tenant SaaS platform** built on the proven **Laravel 11 / PHP 8.3 / MySQL 8** monolith and the thin **Node + Baileys "WA Bridge"** sidecar established by the existing `whatsapp-auto-messenger` spec. It keeps every core messaging, group, channel, extraction, and anti-ban capability of that system and adds three large net-new subsystems:
+This document designs a **multi-tenant SaaS platform** built on the proven **Laravel 12 / PHP 8.3 / MySQL 8** monolith and the thin **Node + Baileys "WA Bridge"** sidecar established by the existing `whatsapp-auto-messenger` spec. It keeps every core messaging, group, channel, extraction, and anti-ban capability of that system and adds three large net-new subsystems:
 
 1. **Multi-tenancy + Billing** — many isolated tenants (customers), each with their own WhatsApp numbers, contacts, campaigns, chatbots, plan, quota, and wallet.
 2. **Conversational AI Engine** — auto-reply, keyword triggers, LLM smart replies, visual flow builder, intent/FAQ, business-hours/away mode, lead capture, order/booking, payments, multi-language, sentiment, human handoff, and conversation analytics. This is the biggest new subsystem and is designed with both high-level and low-level detail below.
@@ -46,7 +46,7 @@ graph TD
     subgraph Edge
         NGINX[nginx TLS HTTP->S]
     end
-    subgraph PHP_FPM[PHP-FPM 8.3 - Laravel 11]
+    subgraph PHP_FPM[PHP-FPM 8.3 - Laravel 12]
         USERPANEL[User Panel - Livewire]
         ADMINPANEL[Admin Panel - Livewire]
         API[/api/v1 - Sanctum + RBAC + Tenant scope/]
@@ -1966,7 +1966,7 @@ The existing `BridgeClient` interface already keeps the send/receive wire behind
 
 ```mermaid
 graph TD
-    subgraph PHP[PHP-FPM 8.3 - Laravel 11]
+    subgraph PHP[PHP-FPM 8.3 - Laravel 12]
         SP[Send Pipeline - Algorithm 3 tenantSendGate]
         WH[Inbound + Delivery Webhooks - HMAC]
         SM[SessionManager]
@@ -2557,7 +2557,7 @@ Funnels, cohort/retention, revenue, **bot deflection rate** (resolved-without-hu
 
 ## Dependencies
 
-- **Reused:** Laravel 11, PHP 8.3, MySQL 8, Livewire 3, Alpine, Tailwind, Supervisor, nginx + PHP-FPM, Node + Baileys bridge, Sanctum, `maatwebsite/excel`, Intervention Image, `dragonmantank/cron-expression`.
+- **Reused:** Laravel 12, PHP 8.3, MySQL 8, Livewire 3, Alpine, Tailwind, Supervisor, nginx + PHP-FPM, Node + Baileys bridge, Sanctum, `maatwebsite/excel`, Intervention Image, `dragonmantank/cron-expression`.
 - **New (core):** an LLM SDK/HTTP client for OpenAI + Gemini (behind `LlmProvider`), payment gateway SDKs (Razorpay/Stripe) behind `PaymentGateway`, a PDF generator for invoices (e.g. `barryvdh/laravel-dompdf`).
 - **Channel Mode backends (all behind the `ChannelDriver` interface):** the existing **Node + Baileys bridge** is the default driver (`BAILEYS`, reused, no new dependency). Additional selectable backends are **opt-in per tenant** and each degrades to the Baileys default when its credentials are absent: **Meta WhatsApp Cloud API** (`CLOUD_API`, HTTP to `graph.facebook.com` — WABA id, phone-number id, access token, verify token), the legacy **WhatsApp Business/On-Premise API** (`ON_PREMISE`, self-hosted client container — **deprecated by Meta, migration path to Cloud API**), and **third-party BSP/gateway SDKs/HTTP** (`BSP_GATEWAY`: Twilio, 360dialog, Gupshup, Vonage, MessageBird, Infobip, WATI, Kaleyra — provider api key/endpoint). Per-mode secrets are envelope-encrypted via `FieldCipher`.
 - **New (optional / scale-up — each MUST degrade gracefully when absent):**
@@ -2607,6 +2607,7 @@ Every optional dependency sits behind an interface (`ChannelDriver`, `VectorStor
 | 20 | Expand-contract migrations + blue-green + feature flags | Multi-step migrations; in exchange, zero-downtime deploys and always-safe rollback |
 | 21 | **Channel Mode**: pluggable per-session messaging backend (`ChannelDriver` generalizes `BridgeClient`), Baileys as default driver + Cloud API / On-Premise / BSP as opt-in modes | Per-mode capability differences + credential/config surface + a routing/failover layer; in exchange, one interface for all WhatsApp backends, tenant choice of ban-risk-vs-features, and **zero official-API setup by default** (Baileys) — a new backend is a class + enum case, never a rewrite |
 | 22 | Capability-gate every mode (`supports()` → `ModeCapabilityException`) and branch anti-ban by mode (web-protocol vs official) | Extra capability handshake + a mode-aware send gate (Algorithm 9); in exchange, unsupported ops fail cleanly (never crash), official modes follow provider template/window rules, and Baileys/on-prem keep the non-bypassable anti-ban guarantee |
+| 23 | **Target Laravel 12, not Laravel 11**, on PHP 8.3 | A framework-major bump away from the version the single-tenant engine shipped on, so the 11→12 breaking changes must be absorbed once (in practice near drop-in: the notable one is `BelongsToMany` gaining invariant `TPivotModel`/`TAccessor` generics, which custom-pivot relations like `Tenant::users()` must now name explicitly). In exchange, the platform is not built on an **EOL framework**: Laravel 11 carries three advisories that are **fixed only in 12.60+**, and one of them — **signed-URL path confusion** — directly undermines **Requirement 9 / A9 (signed expiring URLs)** for media and export links, with the other two being CRLF injection in the default email validation rule. Staying on 11 would have required permanently suppressing those advisories in `composer.json`, violating **NFR3 / Requirement 32 (security)**; targeting 12 removes the exposure at the source and keeps `composer audit` clean with **no advisory ignores** |
 
 ---
 
