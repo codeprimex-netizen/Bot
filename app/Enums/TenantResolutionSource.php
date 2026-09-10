@@ -20,6 +20,18 @@ enum TenantResolutionSource: string
     /** The authenticated panel user's active tenant, via `tenant_users`. */
     case Session = 'session';
 
+    /**
+     * The request host matched a tenant's **verified** custom domain
+     * (`tenant_domains`, Req 9.3, 9.7 / A9).
+     *
+     * Host-derived like `Subdomain`, and no stronger for it — but it is recorded
+     * separately because the two doors are backed by different evidence: a subdomain is
+     * a pattern under a platform apex, while this one required an ownership challenge
+     * and a TLS check to exist at all. An operator reading an audit trail needs to know
+     * which of the two let a request in.
+     */
+    case CustomDomain = 'custom_domain';
+
     /** The request host matched `{slug}.{apex}` for a known tenant. */
     case Subdomain = 'subdomain';
 
@@ -35,9 +47,21 @@ enum TenantResolutionSource: string
     public function isRequestDerived(): bool
     {
         return match ($this) {
-            self::Session, self::Subdomain, self::ApiToken => true,
+            self::Session, self::CustomDomain, self::Subdomain, self::ApiToken => true,
             self::None, self::Manual => false,
         };
+    }
+
+    /**
+     * Whether the tenant was identified from the request **host**.
+     *
+     * The two host-derived doors, named together because they share a rule: a host is
+     * only ever a lookup key into rows the platform already trusts, never an assertion
+     * about who the caller is (Req 9.1 / A9, Correctness Property 27).
+     */
+    public function isHostDerived(): bool
+    {
+        return $this === self::CustomDomain || $this === self::Subdomain;
     }
 
     /**

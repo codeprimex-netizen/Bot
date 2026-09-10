@@ -8,6 +8,7 @@ use App\Models\OutboxMessage;
 use App\Models\SigningSecret;
 use App\Models\Tenant;
 use App\Models\TenantApiToken;
+use App\Models\TenantDomain;
 use App\Models\TenantUsage;
 use App\Models\TenantUser;
 use App\Models\User;
@@ -69,6 +70,19 @@ function tenantScopeExemptions(): array
         // tenant or session id) and by the AAD each secret is sealed with, so a row cannot
         // be moved between scopes. See the migration docblock.
         SigningSecret::class => 'security tier: nullable tenant_id; HMAC verification runs before tenant resolution',
+
+        // Resolution tier (task 5.1, Req 9.3, 9.7 / A9) — the same argument as tenant_users,
+        // one level up. `tenant_domains` is read to answer "which tenant owns this host?",
+        // which task 5.5's routing asks *before* a tenant is bound, so the table cannot be
+        // filtered by the answer it provides. It must also be readable across tenants for a
+        // second reason the other exemptions do not have: the table carries a **global**
+        // `unique(host)` — one domain, one owner, because two tenants claiming one host is a
+        // hijack — and Req 9.7's "already in use" refusal cannot be explained if another
+        // tenant's claim is invisible to the query that checks. Isolation is carried by the
+        // access path: every read names its tenant explicitly
+        // (`TenantDomain::canonicalHostFor($tenantId)`), and only *verified* rows can reach
+        // URL generation. See the TenantDomain docblock and its migration.
+        TenantDomain::class => 'resolution tier: read by host before a tenant is bound; unique(host) is global by design',
     ];
 }
 

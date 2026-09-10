@@ -6,6 +6,8 @@ return [
     App\Providers\AppServiceProvider::class,
     App\Providers\AuditServiceProvider::class,
     App\Providers\TenancyServiceProvider::class,
+    App\Providers\UrlServiceProvider::class,
+    App\Providers\DomainServiceProvider::class,
     App\Providers\PlanGateServiceProvider::class,
     App\Providers\RbacServiceProvider::class,
     App\Providers\DispatchServiceProvider::class,

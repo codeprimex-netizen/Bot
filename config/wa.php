@@ -20,6 +20,7 @@ use App\Services\Tenancy\Provisioning\Steps\EnsureStoragePrefixStep;
 use App\Services\Tenancy\Provisioning\Steps\ProvisionEncryptionKeyStep;
 use App\Services\Tenancy\Provisioning\Steps\RecordProvisioningAuditStep;
 use App\Services\Tenancy\Resolvers\ApiTokenTenantResolver;
+use App\Services\Tenancy\Resolvers\CustomDomainTenantResolver;
 use App\Services\Tenancy\Resolvers\SessionTenantResolver;
 use App\Services\Tenancy\Resolvers\SubdomainTenantResolver;
 
@@ -160,18 +161,27 @@ return [
         | 1. Panel session — an authenticated human's active tenant, validated
         |    against `tenant_users` on every request. Most specific: it is the
         |    only door that knows *who* is acting, so it outranks the host.
-        | 2. Subdomain — `{slug}.{apex}`. Weakest signal (it comes from the
+        | 2. Verified custom domain — an exact host in `tenant_domains`, and only
+        |    a row whose ownership challenge *and* TLS check passed (Req 9.7 / A9).
+        |    Ahead of the subdomain door because it is the more specific claim: an
+        |    exact verified host rather than a pattern under an apex. An
+        |    **unverified** claim resolves nothing at all — if it did, a tenant
+        |    could name a host it does not own and receive requests as that tenant.
+        | 3. Subdomain — `{slug}.{apex}`. Weakest signal (it comes from the
         |    request host), so it only ever acts as a lookup key for a known
         |    tenant and never for URL generation (Req 9.1 / A9).
-        | 3. API key — machine callers on /api/v1. Last because a human panel
+        | 4. API key — machine callers on /api/v1. Last because a human panel
         |    session and an API key never co-occur on the same request; ordering
         |    it last keeps a stray header from overriding a logged-in user.
         |
-        | Verified per-tenant custom domains (Req 9.3, tasks 5.1–5.7) join this
-        | list as another resolver ahead of the subdomain one.
+        | Doors 2 and 3 are both host-derived, and the rule is the same for both:
+        | the host is a **lookup key** into rows the platform already trusts,
+        | never an assertion about the caller. The inverse also holds — URL
+        | *generation* never reads a host at all (Property 27).
         */
         'resolvers' => [
             SessionTenantResolver::class,
+            CustomDomainTenantResolver::class,
             SubdomainTenantResolver::class,
             ApiTokenTenantResolver::class,
         ],
@@ -191,10 +201,100 @@ return [
             explode(',', (string) env('WA_TENANT_APEXES', ''))
         ), static fn (string $host): bool => $host !== '')),
 
-        // Platform-owned labels that can never be a tenant subdomain.
+        // Platform-owned labels that can never be a tenant subdomain — nor a
+        // custom-domain claim under an apex. `App\Services\Domains\PlatformHosts`
+        // is the single reader, so the resolver and the registrar cannot disagree
+        // about which labels belong to the platform.
         'reserved_subdomains' => [
             'www', 'app', 'admin', 'api', 'assets', 'static', 'cdn',
             'mail', 'smtp', 'bridge', 'webhooks', 'status', 'billing', 'support',
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Per-tenant custom domains (Req 9.3, 9.7 / A9)
+        |----------------------------------------------------------------------
+        | A tenant may map its own host (`chat.acme.example`) and, once **both**
+        | halves of Req 9.7 hold — an ownership challenge succeeded and a trusted
+        | TLS certificate covering the host was confirmed — that host resolves the
+        | tenant and becomes the base its URLs are built from.
+        |
+        | What is tunable here is *how* the two halves are checked: where the
+        | challenge is published, how long a caller may wait, how often the proof
+        | is re-tested. What is **not** tunable, anywhere, is whether they are
+        | checked. There is no flag below that verifies a domain, skips the
+        | certificate, or admits an unverified claim to the resolver chain —
+        | `verified_at` is written only by `App\Services\Domains\DomainVerifier`
+        | and only on evidence.
+        */
+        'domains' => [
+            // DNS label the TXT challenge is published under, prefixed to the
+            // claimed host: `_wa-challenge.chat.acme.example`. Leading underscore
+            // by convention (RFC 8552) so it can never collide with a real
+            // hostname the tenant also wants to serve.
+            'dns_record_prefix' => env('WA_DOMAIN_DNS_PREFIX', '_wa-challenge'),
+
+            // Path the ACME-style HTTP challenge is served and read at. The route
+            // in routes/web.php is registered *from this value*, so the URL the
+            // verifier fetches and the URL the platform answers on are one string.
+            'http_challenge_path' => env('WA_DOMAIN_HTTP_CHALLENGE_PATH', '.well-known/wa-domain-challenge'),
+
+            // How long a freshly issued challenge stays satisfiable. Bounds the
+            // *initial* grant only: once verified, the challenge becomes the
+            // standing proof re-checks re-run, and has no deadline.
+            'challenge_ttl_hours' => (int) env('WA_DOMAIN_CHALLENGE_TTL_HOURS', 72),
+
+            // Port the TLS half connects to. Configurable for a deployment whose
+            // custom domains terminate TLS somewhere unusual; 443 otherwise.
+            'tls_port' => (int) env('WA_DOMAIN_TLS_PORT', 443),
+
+            /*
+            |------------------------------------------------------------------
+            | The network seam (Req 31.3 / NFR2)
+            |------------------------------------------------------------------
+            | DNS, HTTP and TLS all reach hosts *tenants* supply, so they are the
+            | one dependency on the platform whose targets are attacker-chosen.
+            | `network` is the shipped, real implementation; any other value must
+            | name an `App\Services\Domains\DomainProbe` (which is how the test
+            | suite binds its fake, and nowhere else — the fake is not
+            | autoloadable in production).
+            */
+            'probe' => [
+                'driver' => env('WA_DOMAIN_PROBE_DRIVER', 'network'),
+
+                // Both bounded, and both small: a verification runs inside a
+                // request a tenant is watching or inside the re-check sweep, and
+                // a hanging lookup there is a stalled worker caused by somebody
+                // else's typo.
+                'connect_timeout' => (int) env('WA_DOMAIN_PROBE_CONNECT_TIMEOUT', 3),
+                'timeout' => (int) env('WA_DOMAIN_PROBE_TIMEOUT', 5),
+
+                // Circuit breaker + inline retry budget. Only the platform's own
+                // inability to look counts as a failure here; a tenant's dead host
+                // returns "not served" and cannot trip the shared breaker.
+                'guard' => [
+                    'enabled' => (bool) env('WA_DOMAIN_PROBE_GUARD', true),
+                    'breaker' => 'domains',
+                    'attempts' => (int) env('WA_DOMAIN_PROBE_ATTEMPTS', 2),
+                    'max_delay_ms' => (int) env('WA_DOMAIN_PROBE_MAX_DELAY_MS', 250),
+                ],
+            ],
+
+            /*
+            |------------------------------------------------------------------
+            | Scheduled re-validation (`wa:domains:recheck`)
+            |------------------------------------------------------------------
+            | A verification is a statement about one instant. Certificates
+            | expire, records get tidied away, domains change hands — and the last
+            | of those is the dangerous one, because a name pointed back at the
+            | platform under a new owner would keep routing as the old tenant. So
+            | the proof is re-tested, cheaply: stale rows only, stalest first, a
+            | bounded batch per tick.
+            */
+            'recheck' => [
+                'interval_hours' => (int) env('WA_DOMAIN_RECHECK_INTERVAL_HOURS', 24),
+                'batch' => (int) env('WA_DOMAIN_RECHECK_BATCH', 25),
+            ],
         ],
 
         /*
@@ -1078,6 +1178,89 @@ return [
 
             // design.md: config / feature flags — 5 min.
             'plans' => (int) env('WA_CACHE_TTL_PLANS', 300),
+
+            // The canonical base URL and the platform settings it is resolved from
+            // (`App\Services\Url\BaseUrlCache`, `App\Services\Platform\PlatformSettings`).
+            // Both namespaces are version-bumped by their writers, so the TTL only bounds
+            // how long an *orphaned* entry occupies the store.
+            'base_url' => (int) env('WA_CACHE_TTL_BASE_URL', 300),
+            'platform_settings' => (int) env('WA_CACHE_TTL_PLATFORM_SETTINGS', 300),
+
+            // The host -> tenant lookup every request on a verified custom domain
+            // performs, plus the verified-host list task 5.4's allowlist reads
+            // (`App\Services\Domains\VerifiedDomainDirectory`). Version-bumped by
+            // `TenantDomain`'s save/delete hooks, so a verification or a revocation
+            // lands on the next request rather than after this TTL.
+            'tenant_domains' => (int) env('WA_CACHE_TTL_TENANT_DOMAINS', 300),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Canonical base URL (Req 9.1, 9.3 / A9)
+    |--------------------------------------------------------------------------
+    | The origin every absolute link, webhook callback, signed URL and OAuth
+    | redirect is built from. It is **not** configured here: the chain is
+    |
+    |   per-tenant verified custom domain (`tenant_domains`)
+    |     -> `platform_settings['base_url']` (admin-editable, no redeploy)
+    |     -> `APP_URL` (config/app.php)
+    |
+    | resolved by `App\Services\Url\BaseUrl`. What lives here is the one *policy*
+    | around that chain that an environment legitimately differs on.
+    |
+    | Two things this file cannot do, by design. It cannot introduce a fourth
+    | source of the origin — a config key holding a host would be a fourth place
+    | to look and a fourth thing to get wrong. And nothing here can make URL
+    | generation read the request `Host`/`X-Forwarded-Host` header: that is
+    | Property 27, and it is structural (no implementation of `BaseUrl` takes a
+    | request at all), not a flag.
+    |
+    | Note on tenant subdomains: `tenant.{slug}.{apex}` is a *derivation* of the
+    | platform apex, produced by `UrlBuilder::tenantSubdomain()` (task 5.2) for
+    | callers that want it, and is deliberately not a link in the precedence
+    | chain — Req 9.3 lists three sources, and a tenant with no subdomain must
+    | still have a base.
+    */
+    'url' => [
+        // Force emitted URLs to HTTPS. A webhook callback or signed link served
+        // over http:// puts a credential-grade token in cleartext, so the answer
+        // is yes everywhere except `local`/`testing`.
+        //
+        // Leave unset (the default) and the environment decides. Set it only for a
+        // deployment the environment name gets wrong: `false` for an internal
+        // staging box with no certificate, `true` for a node behind a proxy that
+        // terminates TLS while APP_URL is still written as http.
+        'force_https' => env('WA_URL_FORCE_HTTPS'),
+
+        /*
+        |----------------------------------------------------------------------
+        | Signed / expiring URLs (Req 9.6 / A9)
+        |----------------------------------------------------------------------
+        | Export downloads and payment links are signed against the **canonical
+        | host** (`App\Services\Url\SignedUrlSigner`): the authority is a field
+        | inside the HMAC, so a valid signature cannot be lifted onto another host.
+        |
+        | Two things deliberately absent from this group, because neither is an
+        | operator's decision to make:
+        |
+        |   - **the 3600-second ceiling.** Req 9.6 names it, and it is a constant
+        |     (`SignedUrlSigner::MAX_WINDOW_SECONDS`). A config key would be a way
+        |     to raise a security ceiling from an env file; the key below sets the
+        |     default *under* it and is refused, loudly, if it exceeds it.
+        |   - **the signing secret.** It comes from `SigningSecretStore` under the
+        |     platform-wide scope `url:signed`, so it is sealed by the same KMS as
+        |     every other HMAC secret and inherits the dual-secret rotation in
+        |     `security.hmac` below. That overlap window (48h) is far longer than any
+        |     link's life, so rotating it never breaks a link already in an inbox —
+        |     which a secret derived from APP_KEY would.
+        */
+        'signed' => [
+            // Lifetime of a signed link when the caller names no explicit expiry.
+            // Must be between 1 and 3600 seconds; anything else is a deployment error
+            // and is refused at the first link rather than clamped, so nobody hands
+            // out a URL they believe lives longer than the platform allows.
+            'ttl_seconds' => (int) env('WA_URL_SIGNED_TTL', 900),
         ],
     ],
 

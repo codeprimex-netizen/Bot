@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Console\Commands\PruneIdempotencyKeys;
+use App\Console\Commands\RecheckTenantDomains;
 use App\Console\Commands\RelayOutbox;
 use App\Console\Commands\ResumeQuotaPausedWork;
 use App\Console\Commands\RotateMasterKey;
@@ -179,3 +180,31 @@ Schedule::command(RotateSigningSecrets::class)
     ->withoutOverlapping(30)
     ->onOneServer()
     ->description('Rotate HMAC signing secrets with an overlap window and purge closed ones');
+
+/*
+| Verified tenant custom domains are re-validated hourly (Req 9.7 / A9, task 5.5).
+|
+| Hourly is the *tick*, not the cadence: each run takes only the verified domains whose
+| evidence is older than `wa.tenancy.domains.recheck.interval_hours` (default 24), stalest
+| first, capped at `recheck.batch` (default 25). So a platform with a handful of domains
+| does almost nothing 23 hours out of 24, and a platform with thousands works through them
+| across ticks without ever probing them all in one process. A tick with nothing due is one
+| indexed query against `idx(verified_at, last_checked_at)` and no writes.
+|
+| Why re-check at all: a verification is a statement about one instant. The cheap failures
+| are a lapsed certificate or a tidied-away DNS record; the dangerous one is a domain that
+| changes hands and is pointed back at the platform, where a TLS-only check would still pass
+| while the name is no longer the tenant's. `DomainVerifier::verify()` re-runs the ownership
+| challenge as well, so that case is caught and the domain is revoked — and revocation lands
+| on the next request, because both host caches hang off the model's save hook.
+|
+| A run that cannot reach the network changes **nothing**: an inconclusive probe leaves every
+| domain exactly as it was (see `DomainVerificationFailure::isConclusive()`). That is what
+| makes this safe to schedule — the failure mode of the sweep itself is "no effect", never
+| "unverify the platform".
+*/
+Schedule::command(RecheckTenantDomains::class)
+    ->hourly()
+    ->withoutOverlapping(30)
+    ->onOneServer()
+    ->description('Re-validate verified custom domains and revoke those whose proof no longer holds');
