@@ -20,6 +20,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Middleware\TrustProxies as FrameworkTrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Symfony\Component\HttpFoundation\Exception\SuspiciousOperationException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -93,6 +94,34 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->appendToGroup('web', ResolveTenant::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        /*
+        | Req 9.5 / A9 — the framework's own host refusal, in the platform's vocabulary.
+        |
+        | `EnforceAllowedHost` converts Symfony's `SuspiciousOperationException` into the
+        | typed refusal below, but it only gets the chance when it is the first thing to
+        | read the host — and it is not. The framework's `TrustProxies` runs *before* it
+        | (deliberately: the accepted-host check has to see the effective, post-forwarding
+        | host) and calls `$request->host()` itself, for its Forge/Vapor detection. So a
+        | *structurally* unreadable Host — embedded credentials, a CR/LF payload, a NUL, a
+        | U-label, two root dots — raised before `EnforceAllowedHost` ran, and Laravel
+        | mapped it (`RequestExceptionInterface`) to a generic `Bad request.` 400: right
+        | status, but no `host_not_allowed` code, no JSON envelope for an API caller, and no
+        | log line naming the host. Two refusal shapes for one cause, which is exactly what
+        | `EnforceAllowedHost` documents that it exists to prevent.
+        |
+        | Mapped rather than rendered, because a render callback runs *after*
+        | `prepareException()` has already turned it into a `BadRequestHttpException` —
+        | catching it there would mean catching every bad request. Mapping also covers every
+        | other place the framework can raise it (`TrustHosts`, a later `getHost()`), so the
+        | conversion is not a list of known callers.
+        */
+        $exceptions->map(function (SuspiciousOperationException $e): HostNotAllowedException {
+            $request = app('request');
+            $host = $request instanceof Request ? $request->headers->get('HOST') : null;
+
+            return HostNotAllowedException::forHost(is_string($host) ? $host : '');
+        });
+
         // Req 9.5 / A9: a request on a host the platform does not serve gets a 400 saying
         // exactly that, and nothing else.
         //

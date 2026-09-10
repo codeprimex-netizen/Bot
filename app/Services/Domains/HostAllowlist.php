@@ -156,6 +156,19 @@ final class HostAllowlist
      * host by Symfony. Non-capturing matters: Symfony joins the patterns into one branch
      * reset group, so a capturing group here would change the meaning of its neighbours'.
      *
+     * ## The trailing `\.?`
+     *
+     * `Request::getHost()` strips a trailing port and lowercases, but **keeps a single root
+     * dot**: `Host: bot.example.com.` reaches the application as `bot.example.com.`, which
+     * is a legitimate FQDN spelling that clients and resolvers do send. `accepts()` folds
+     * that dot away (`normalise()`), so without the optional dot here the two layers would
+     * disagree on exactly that spelling — and disagree in the direction that hurts, because
+     * Symfony's check is the deeper one: the request would die inside `getHost()` with a
+     * generic 400 for a host this platform considers its own.
+     *
+     * It admits no new host. `X` and `X.` are the same name, and Symfony rejects two or
+     * more trailing dots before a pattern is ever consulted.
+     *
      * @return list<string>
      */
     public function patterns(): array
@@ -164,11 +177,11 @@ final class HostAllowlist
 
         foreach ($this->hosts->apexes() as $apex) {
             // The apex itself, or exactly one label under it.
-            $patterns[] = '^(?:'.self::LABEL_FRAGMENT.'\.)?'.preg_quote($apex).'$';
+            $patterns[] = '^(?:'.self::LABEL_FRAGMENT.'\.)?'.preg_quote($apex).'\.?$';
         }
 
         foreach ($this->exactHosts() as $host) {
-            $patterns[] = '^'.preg_quote($host).'$';
+            $patterns[] = '^'.preg_quote($host).'\.?$';
         }
 
         return array_values(array_unique($patterns));
