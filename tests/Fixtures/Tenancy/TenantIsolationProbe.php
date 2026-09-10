@@ -19,6 +19,7 @@ use App\Models\EncryptionKey;
 use App\Models\QuotaHold;
 use App\Models\Saga;
 use App\Models\Scopes\TenantScope;
+use App\Models\Session;
 use App\Models\Tenant;
 use App\Models\TenantApiToken;
 use App\Models\TenantTierAssignment;
@@ -547,6 +548,30 @@ final class TenantIsolationProbe
                     $tenantId === null
                         ? AbuseEvent::withoutTenantScope()
                         : AbuseEvent::forTenant($tenantId)
+                )->get()->all(),
+            ),
+            new TenantOwnedSubject(
+                model: Session::class,
+                maxRowsPerTenant: 6,
+                appendOnly: false,
+                sumColumn: 'weight',
+                // `reconnects` rather than `name`: the seams write an integer into this
+                // column, and `name` carries uniq(tenant_id, name) — a constant written
+                // there would fail on a unique violation instead of on the ownership
+                // check the seam is measuring.
+                mutableColumn: 'reconnects',
+                writer: static fn (Tenant $tenant, int $index, self $probe): Model => Session::factory()->create([
+                    'tenant_id' => $tenant->id,
+                    // uniq(tenant_id, name); the seed and row counter keep it unique
+                    // across the whole run without being random.
+                    'name' => 'probe session '.$probe->seed.'/'.$probe->rows.'/'.$index,
+                    'weight' => $probe->int(1, 10),
+                    'reconnects' => $probe->int(0, 5),
+                ]),
+                reader: static fn (?string $tenantId): array => (
+                    $tenantId === null
+                        ? Session::withoutTenantScope()
+                        : Session::forTenant($tenantId)
                 )->get()->all(),
             ),
         ];

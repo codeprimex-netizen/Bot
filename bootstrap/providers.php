@@ -19,4 +19,5 @@ return [
     App\Providers\RetryServiceProvider::class,
     App\Providers\OutboxServiceProvider::class,
     App\Providers\SagaServiceProvider::class,
+    App\Providers\BridgeServiceProvider::class,
 ];

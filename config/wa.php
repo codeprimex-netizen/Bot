@@ -6,6 +6,7 @@ use App\Enums\CircuitScope;
 use App\Enums\ErrorClass;
 use App\Enums\QuotaKind;
 use App\Enums\TenantTier;
+use App\Services\Bridge\BridgeErrorClassifier;
 use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
 use App\Services\Reliability\HttpOutboxTransport;
 use App\Services\Security\ConfigMasterKeyWrapper;
@@ -46,10 +47,59 @@ return [
     | WA Bridge (Node + Baileys sidecar)
     |--------------------------------------------------------------------------
     */
+    /*
+    | The sidecar holds the protocol socket and nothing else: no business logic,
+    | no database, no decisions (ROADMAP § "WA Bridge"). `App\Services\Bridge\HttpBridgeClient`
+    | is the only reader of these keys, and `App\Providers\BridgeServiceProvider`
+    | composes it into the chain every caller actually gets:
+    |
+    |   TenantScopedBridgeClient -> GuardedBridgeClient -> HttpBridgeClient
+    |
+    | Nothing below can move the first of those. Ownership scoping — every session
+    | id resolved against the acting tenant before a byte leaves the process — is
+    | structural, because the sidecar has no tenant column and could not check it.
+    */
     'bridge' => [
         'url' => env('WA_BRIDGE_URL', 'http://127.0.0.1:3000'),
         'token' => env('WA_BRIDGE_TOKEN'),
         'timeout' => (int) env('WA_BRIDGE_TIMEOUT', 15),
+
+        // Seconds to wait for the TCP connection alone, separate from the whole
+        // request. Small: the sidecar is a local process, so a slow *connect* means
+        // it is down rather than busy, and waiting out the full request timeout to
+        // learn that is a stalled worker.
+        'connect_timeout' => (int) env('WA_BRIDGE_CONNECT_TIMEOUT', 5),
+
+        // Path segment between the host and the routes (`/v1/sessions/...`). Empty
+        // mounts the routes at the root. A string, so a sidecar behind a shared
+        // ingress can be given a mount point without touching the client.
+        'prefix' => env('WA_BRIDGE_PREFIX', ''),
+
+        /*
+        |----------------------------------------------------------------------
+        | The network seam (Req 31.1, 31.3 / NFR2)
+        |----------------------------------------------------------------------
+        | Same guard the KMS client and the domain probe get, and composed the
+        | same way — retry loop outside, breaker inside. The breaker is keyed
+        | **per session** (`CircuitScope::Bridge`, name = session id), so one
+        | tenant's flapping number fences off that session and nothing else; a
+        | platform-wide bridge breaker would have made one bad number an outage
+        | for everybody.
+        |
+        | `enabled => false` is for a deployment that fences egress some other
+        | way. It removes the breaker and the inline retry; it cannot remove the
+        | ownership check, which is not a resilience feature.
+        */
+        'guard' => [
+            'enabled' => (bool) env('WA_BRIDGE_GUARD', true),
+
+            // Inline attempts per operation, and the longest single inline wait.
+            // Both deliberately tiny: this waits inside the request or job that
+            // asked, and the real budget is the queue's (`ErrorClass::Bridge`,
+            // five attempts on jittered backoff).
+            'attempts' => (int) env('WA_BRIDGE_ATTEMPTS', 2),
+            'max_delay_ms' => (int) env('WA_BRIDGE_MAX_DELAY_MS', 250),
+        ],
     ],
 
     /*
@@ -961,6 +1011,12 @@ return [
             ],
 
             'classifiers' => [
+                // The WA Bridge's own refusals (task 6.x's substrate). It reads the
+                // sidecar's error `code` first and its HTTP status second, so a
+                // `409 session_not_connected` is retried on the BRIDGE budget while a
+                // `422 not_on_whatsapp` fails fast. Returns null for anything that is
+                // not a bridge exception, so the chain continues.
+                BridgeErrorClassifier::class,
             ],
         ],
 
