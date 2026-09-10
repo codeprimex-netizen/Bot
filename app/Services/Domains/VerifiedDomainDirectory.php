@@ -58,7 +58,7 @@ final class VerifiedDomainDirectory
     private const string NO_TENANT = '';
 
     /**
-     * Key holding the whole verified-host list, for `TrustHosts` (task 5.4).
+     * Key holding the whole verified-host list, for `HostAllowlist` (task 5.4).
      */
     private const string HOSTS_KEY = 'hosts';
 
@@ -102,10 +102,11 @@ final class VerifiedDomainDirectory
      * Every verified custom-domain host on the platform, lowercase.
      *
      * This is the half of Req 9.4's accepted-host allowlist that lives in the database;
-     * task 5.4 composes it with the platform apex and the verified tenant subdomains to
-     * configure `TrustHosts`. Exposed here rather than assembled there so "a host is
-     * accepted" and "a host resolves a tenant" can never answer differently — they read
-     * the same rows through the same cache version.
+     * `HostAllowlist` (task 5.4) composes it with the platform apex and the verified tenant
+     * subdomains to configure `TrustHosts` and to answer the host check on every request.
+     * Exposed here rather than assembled there so "a host is accepted" and "a host resolves
+     * a tenant" can never answer differently — they read the same rows through the same
+     * cache version.
      *
      * @return list<string>
      */

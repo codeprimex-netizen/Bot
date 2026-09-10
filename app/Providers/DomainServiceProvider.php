@@ -8,6 +8,7 @@ use App\Services\Domains\DomainProbe;
 use App\Services\Domains\DomainRegistrar;
 use App\Services\Domains\DomainVerifier;
 use App\Services\Domains\GuardedDomainProbe;
+use App\Services\Domains\HostAllowlist;
 use App\Services\Domains\NetworkDomainProbe;
 use App\Services\Domains\PlatformHosts;
 use App\Services\Domains\VerifiedDomainDirectory;
@@ -43,6 +44,12 @@ class DomainServiceProvider extends ServiceProvider
         // Holds nothing but a `VersionedCache`, which reads its version from the store on
         // every call — so a verification on another node is visible to this one.
         $this->app->singleton(VerifiedDomainDirectory::class);
+
+        // The accepted-host allowlist (Req 9.4, task 5.4). A singleton for the same reason
+        // as the two above — it holds no state of its own, and every input it reads
+        // (config, the canonical base, the verified-host list) carries its own
+        // invalidation, so a long-lived worker cannot pin a stale answer.
+        $this->app->singleton(HostAllowlist::class);
 
         $this->app->singleton(DomainProbe::class, fn (Application $app): DomainProbe => $this->guarded(
             $app,

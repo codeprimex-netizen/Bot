@@ -6,14 +6,20 @@ use App\Exceptions\Billing\FeatureNotInPlanException;
 use App\Exceptions\Security\PermissionDeniedException;
 use App\Exceptions\Tenancy\CrossTenantAccessException;
 use App\Exceptions\Tenancy\QuotaExceededException;
+use App\Exceptions\Url\HostNotAllowedException;
+use App\Http\Middleware\EnforceAllowedHost;
 use App\Http\Middleware\EnsurePermission;
 use App\Http\Middleware\EnsurePlanFeature;
 use App\Http\Middleware\ResolveTenant;
+use App\Http\Middleware\TrustProxies;
+use App\Services\Domains\HostAllowlist;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Middleware\TrustProxies as FrameworkTrustProxies;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -22,6 +28,49 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        /*
+        | Req 9.4 / A9 — the accepted-host allowlist, wired from the live one.
+        |
+        | `App\Services\Domains\HostAllowlist` is the single source: the platform apex(es),
+        | one label under each (tenant subdomains), and every *verified* custom domain,
+        | read through the same cache version tenant resolution uses — so a domain verified
+        | a second ago is accepted now and a revoked one is refused now. A callable rather
+        | than an array because that list changes at runtime, and a static config array
+        | would pin it to deploy time.
+        |
+        | `subdomains: false` on purpose: the framework's own helper would add
+        | `^(.+\.)?{APP_URL host}$`, which admits *any depth* of subdomain — `a.b.apex` is
+        | not a tenant subdomain, and one wildcard certificate should not become an open
+        | host space. The patterns from the allowlist admit exactly one label.
+        |
+        | `patternsFor()` returns `[]` — Symfony's spelling of "no host restriction" — for
+        | the paths that must answer on a host the platform has not accepted yet: the
+        | ACME-style domain-ownership challenge (an http-01 check is fetched at the host
+        | *before* it is verified, so restricting it would make the method permanently
+        | unsatisfiable) and the health check (an orchestrator dials a container by IP).
+        | `EnforceAllowedHost` skips the same paths from the same list.
+        */
+        $middleware->trustHosts(at: static function (): array {
+            $allowlist = app(HostAllowlist::class);
+            $request = app('request');
+
+            return $request instanceof Request
+                ? $allowlist->patternsFor($request->decodedPath())
+                : $allowlist->patterns();
+        }, subdomains: false);
+
+        // Req 9.5 / A9: an unlisted host is refused with a typed 400 before routing
+        // dispatches anything. Appended to the global stack so it runs *after*
+        // TrustProxies and therefore checks the effective host (a trusted proxy's
+        // X-Forwarded-Host), and so it covers API and webhook traffic, not just `web`.
+        $middleware->append(EnforceAllowedHost::class);
+
+        // Trust no proxy unless one is configured (`wa.url.proxies.trusted`). Replacing
+        // the framework's middleware rather than calling `trustProxies(at: ...)` here:
+        // this callback runs while the HTTP kernel is constructed, before the config
+        // files are loaded, so a value read at this point would always be null.
+        $middleware->replace(FrameworkTrustProxies::class, TrustProxies::class);
+
         // Available explicitly for API/panel route groups, which stack the
         // membership, plan, and quota gates on top of it.
         $middleware->alias([
@@ -44,6 +93,31 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->appendToGroup('web', ResolveTenant::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // Req 9.5 / A9: a request on a host the platform does not serve gets a 400 saying
+        // exactly that, and nothing else.
+        //
+        // Rendered here — plain text for a browser, the usual envelope for an API client —
+        // rather than through the error views, because a Blade error page builds asset and
+        // route URLs, and building URLs while serving a host we have just refused is the
+        // thing this refusal exists to prevent. The body never echoes the host back: the
+        // sender knows what it sent, and reflecting an attacker-controlled header adds a
+        // surface for nothing. The host is in the log line
+        // (`HostNotAllowedException::operatorMessage()`).
+        $exceptions->render(function (HostNotAllowedException $e, Request $request): JsonResponse|Response {
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'message' => $e->publicMessage(),
+                    'error' => HostNotAllowedException::ERROR_CODE,
+                ], HostNotAllowedException::STATUS);
+            }
+
+            return response(
+                $e->publicMessage()."\n",
+                HostNotAllowedException::STATUS,
+                ['Content-Type' => 'text/plain; charset=utf-8'],
+            );
+        });
+
         // Req 1.3 / A1: a cross-tenant access attempt is a clean 403 on every
         // surface. The exception carries its own status (it is an
         // HttpExceptionInterface), so the panel gets the framework's 403 page; API

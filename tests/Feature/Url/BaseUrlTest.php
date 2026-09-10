@@ -256,7 +256,18 @@ it('never reads the request host anywhere in the base-URL path', function (): vo
         'UrlGenerator',
     ];
 
-    $files = [app_path('Models/TenantDomain.php'), app_path('Services/Platform/PlatformSettings.php')];
+    $files = [
+        app_path('Models/TenantDomain.php'),
+        app_path('Services/Platform/PlatformSettings.php'),
+        // The two host-*decision* classes (task 5.4). They are not in `Services/Url`
+        // because they answer "may this host be served?" rather than "what host do we
+        // emit?" — but they take a host as an argument, and the moment either of them
+        // reaches for the request instead, the platform has a second opinion about hosts
+        // derived from the header. `PlatformHosts` in particular now feeds both the apex
+        // the platform *emits* under and the allowlist that *accepts* it.
+        app_path('Services/Domains/PlatformHosts.php'),
+        app_path('Services/Domains/HostAllowlist.php'),
+    ];
 
     foreach (Finder::create()->files()->name('*.php')->in([app_path('Services/Url'), app_path('Support/Url')]) as $file) {
         $files[] = $file->getRealPath();

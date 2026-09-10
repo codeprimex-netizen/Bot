@@ -1262,6 +1262,91 @@ return [
             // out a URL they believe lives longer than the platform allows.
             'ttl_seconds' => (int) env('WA_URL_SIGNED_TTL', 900),
         ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Accepted request hosts (Req 9.4, 9.5 / A9)
+        |----------------------------------------------------------------------
+        | The *other* half of Property 27. URL generation never reads the request
+        | host (above); this decides which hosts the platform will answer on at
+        | all. `App\Services\Domains\HostAllowlist` is the single reader, and it
+        | builds the list from data rather than from config: the apex(es), one
+        | label under each (tenant subdomains), and every **verified** custom
+        | domain — the same rows, through the same cache version, that tenant
+        | resolution reads, so "accepted" and "resolves a tenant" cannot answer
+        | differently. Nothing below can add an unverified domain to it.
+        |
+        | Wired into Laravel's `TrustHosts` *and* into
+        | `App\Http\Middleware\EnforceAllowedHost` (see `bootstrap/app.php`): the
+        | first restricts Symfony's `Request::getHost()`, the second turns an
+        | unlisted host into the typed 400 of Req 9.5 before routing dispatches.
+        */
+        'hosts' => [
+            // Whether an unrecognised host is refused. Unset (the default) follows
+            // the environment — enforced everywhere except `local`/`testing`, which
+            // is what Laravel's own `TrustHosts` does: a dev box is reached by
+            // 127.0.0.1, a tunnel name, or whatever a container published, and none
+            // of those is the configured base. Set it to `true` on a staging
+            // environment to rehearse production's refusals.
+            'enforce' => env('WA_URL_ENFORCE_HOSTS'),
+
+            // Extra exact hosts to accept. For an internal name a load balancer,
+            // service mesh, or uptime probe dials the node by — not a place to put
+            // a tenant domain, which belongs in `tenant_domains` and must be
+            // verified. Comma-separated in the environment. Empty in normal
+            // operation.
+            'additional' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env('WA_URL_ADDITIONAL_HOSTS', ''))
+            ), static fn (string $host): bool => $host !== '')),
+
+            // Paths served on **any** host, because their whole point is to answer
+            // before a host is recognised. `up` is the framework health endpoint
+            // (an orchestrator dials a pod by IP, so its `Host` matches no
+            // allowlist, and a rejected liveness probe is a restart loop that looks
+            // like an application crash).
+            //
+            // The domain-ownership challenge path is *not* listed here: it is added
+            // by `HostAllowlist` from `wa.tenancy.domains.http_challenge_path`, the
+            // same key `routes/web.php` registers the route from, so the exemption
+            // and the route cannot drift apart. An http-01 challenge is fetched at
+            // the host under verification *before* it is verified — the one state in
+            // which that host is legitimately not on the allowlist.
+            //
+            // Add to this list only for a path that binds no tenant, reads nothing
+            // tenant-scoped, and emits no URL.
+            'unrestricted_paths' => ['up'],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Trusted proxies (Req 9.4 / A9; request attribution, NFR3)
+        |----------------------------------------------------------------------
+        | Empty by default, and that is a security decision:
+        | `X-Forwarded-For`/`-Proto` are client-supplied strings, so trusting them
+        | from an untrusted source lets any caller pick its own IP address — which
+        | the platform believes when it rate-limits, when the anti-fraud engine
+        | scores a device/IP, and when the audit trail records where a request came
+        | from. A deployment behind a load balancer lists it here and only then are
+        | its headers believed.
+        |
+        | `*` (trust the immediate peer, whatever it is) is accepted for a managed
+        | load balancer with no stable address, but it is never a default and never
+        | inferred. `App\Http\Middleware\TrustProxies` is the only reader, and it
+        | trusts the four standard forwarded headers — not `X-Forwarded-Prefix`,
+        | which would let a header rewrite the framework's notion of the
+        | application root.
+        |
+        | None of this can move an emitted URL: `ConfiguredBaseUrl` reads no request
+        | state at all (Property 27). It affects *attribution*, and the host the
+        | accepted-host check sees.
+        */
+        'proxies' => [
+            'trusted' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env('WA_TRUSTED_PROXIES', ''))
+            ), static fn (string $proxy): bool => $proxy !== '')),
+        ],
     ],
 
     /*

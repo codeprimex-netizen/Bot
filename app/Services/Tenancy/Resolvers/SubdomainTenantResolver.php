@@ -19,8 +19,8 @@ use Illuminate\Support\Str;
  * lookup key, and only after three checks:
  *
  * 1. the host must sit exactly one label below a *configured* apex
- *    (`wa.tenancy.apexes`, defaulting to the host of `config('app.url')`) — an
- *    arbitrary `Host:` header therefore matches nothing;
+ *    (`wa.tenancy.apexes`, defaulting to the host of the canonical platform base) —
+ *    an arbitrary `Host:` header therefore matches nothing;
  * 2. that label must be a syntactically valid DNS label and must not be a
  *    reserved platform name (`www`, `admin`, `api`, ...);
  * 3. the label must match a row in `tenants`. No row, no tenant — never a
@@ -45,9 +45,14 @@ use Illuminate\Support\Str;
  * precisely the space this resolver owns — so the order between them is a statement of
  * specificity rather than a tie-break that fires.
  *
- * The remaining A9 work is task 5.4's: the accepted-host allowlist (platform apex +
- * verified tenant subdomains + verified custom domains) rejecting unlisted hosts at
- * `TrustHosts`, before resolution runs at all.
+ * ## The gate in front of it
+ *
+ * `App\Services\Domains\HostAllowlist` (task 5.4) refuses a host outside the platform's
+ * host space *before* this runs, from the same `PlatformHosts` this class asks. So by the
+ * time a request reaches here its host is one the platform serves, and the only question
+ * left is which tenant — if any — owns the label. The two are deliberately not the same
+ * question: a reserved label and an unclaimed label are both accepted hosts and neither
+ * resolves a tenant.
  */
 final class SubdomainTenantResolver implements TenantResolver
 {
