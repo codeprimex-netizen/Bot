@@ -6,6 +6,7 @@ namespace App\Providers;
 
 use App\Enums\ChannelMode;
 use App\Services\Audit\AuditService;
+use App\Services\Channel\BaileysChannelDriver;
 use App\Services\Channel\ChannelCredentialStore;
 use App\Services\Channel\ChannelDriver;
 use App\Services\Channel\ChannelRouter;
@@ -50,13 +51,11 @@ use Illuminate\Support\ServiceProvider;
  * mis-keyed entry in an environment-driven map would be a live cross-mode routing bug — a
  * tenant's official traffic leaving through another backend's credentials.
  *
- * The map is **empty until tasks 7.1–7.5 land**, and the router says so loudly: resolving a
- * mode with no entry raises `LogicException` naming the mode and listing what is registered,
- * rather than substituting a default backend. Each of those tasks adds exactly one line:
- *
- * ```php
- * ChannelMode::Baileys->value => fn (): ChannelDriver => $app->make(BaileysChannelDriver::class),
- * ```
+ * `BAILEYS` is registered (task 7.1); the three official modes are tasks 7.2–7.4 and each adds
+ * exactly one line. Until then the router says so loudly: resolving a mode with no entry raises
+ * `LogicException` naming the mode and listing what is registered, rather than substituting a
+ * default backend — so an unfinished mode is a deployment defect reported as one, never a
+ * tenant's official traffic quietly leaving through the Baileys bridge.
  *
  * Closures rather than class strings so a driver may be constructed however it needs to be —
  * `BaileysChannelDriver` wraps the existing `BridgeClient` chain, `BspGatewayChannelDriver`
@@ -90,17 +89,26 @@ class ChannelServiceProvider extends ServiceProvider
     /**
      * One entry per `ChannelMode`, keyed by its backed value — the platform's driver registry.
      *
-     * Empty here, and filled one line at a time by tasks 7.1–7.5. Keys are
-     * `ChannelMode::*->value` rather than free strings so a typo cannot register a driver under
-     * a mode that does not exist; the router additionally refuses an entry whose driver reports
-     * a different `mode()` than the key it was found under.
+     * Filled one line at a time by tasks 7.1–7.5. Keys are `ChannelMode::*->value` rather than
+     * free strings so a typo cannot register a driver under a mode that does not exist; the
+     * router additionally refuses an entry whose driver reports a different `mode()` than the
+     * key it was found under.
+     *
+     * `BAILEYS` is registered through the container rather than constructed here, and that is
+     * the point of the closure: `BaileysChannelDriver` asks for the `BridgeClient`
+     * **interface**, so what it receives is the chain `BridgeServiceProvider` composed —
+     * `TenantScopedBridgeClient → GuardedBridgeClient → HttpBridgeClient`. Naming
+     * `HttpBridgeClient` here, or letting the driver build its own, would drop ownership
+     * scoping and the breaker for every send routed through Channel Mode while leaving the
+     * pre-Channel-Mode paths intact — a regression with no symptom until a tenant addressed
+     * another tenant's session id.
      *
      * @return array<string, Closure(): ChannelDriver>
      */
     private static function drivers(Application $app): array
     {
         return [
-            // Task 7.1: ChannelMode::Baileys->value    => fn (): ChannelDriver => $app->make(BaileysChannelDriver::class),
+            ChannelMode::Baileys->value => fn (): ChannelDriver => $app->make(BaileysChannelDriver::class),
             // Task 7.2: ChannelMode::CloudApi->value   => fn (): ChannelDriver => $app->make(CloudApiChannelDriver::class),
             // Task 7.3: ChannelMode::OnPremise->value  => fn (): ChannelDriver => $app->make(OnPremiseChannelDriver::class),
             // Task 7.4: ChannelMode::BspGateway->value => fn (): ChannelDriver => $app->make(BspGatewayChannelDriver::class),

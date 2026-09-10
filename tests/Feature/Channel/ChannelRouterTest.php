@@ -22,7 +22,7 @@ use App\Services\Tenancy\PlanGate;
 use App\Services\Tenancy\TenantContext;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Tests\Fixtures\Channel\RouterProbeDriver;
+use Tests\Fixtures\Channel\FakeChannelDriver;
 
 /*
 |--------------------------------------------------------------------------
@@ -43,27 +43,29 @@ use Tests\Fixtures\Channel\RouterProbeDriver;
 |   4. **`failoverChain()` resolves, and only resolves** — head, dedup, unknown-value
 |      tolerance, credential omission, and the plan gate. Execution is task 8.5.
 |
-| Drivers are tasks 7.1–7.5, so the registry here holds `RouterProbeDriver`s: honest about
-| mode and policy (it uses `DerivesChannelPolicy`, as the real ones will), and counting its
+| The registry here holds `FakeChannelDriver`s (task 7.5): honest about mode and policy — it
+| derives both from `DerivesChannelPolicy`, exactly as the real drivers do — and counting its
 | own constructions, which is the only way to tell memoisation from an equal-looking object.
+| It replaced task 6.3's `RouterProbeDriver`, which existed only until 7.5 landed; every
+| assertion below is the one that fixture carried.
 */
 
 beforeEach(function (): void {
     Cache::flush();
-    RouterProbeDriver::reset();
+    FakeChannelDriver::reset();
 });
 
 /**
- * A router wired exactly as `ChannelServiceProvider` wires the real one, with a probe driver
+ * A router wired exactly as `ChannelServiceProvider` wires the real one, with a fake driver
  * registered for `$modes` (all four by default).
  */
-function probeRouter(ChannelMode ...$modes): DefaultChannelRouter
+function fakeRouter(ChannelMode ...$modes): DefaultChannelRouter
 {
     return new DefaultChannelRouter(
         app(TenantContext::class),
         app(ChannelCredentialStore::class),
         app(PlanGate::class),
-        RouterProbeDriver::registry(...($modes === [] ? ChannelMode::cases() : $modes)),
+        FakeChannelDriver::registry(...($modes === [] ? ChannelMode::cases() : $modes)),
     );
 }
 
@@ -127,7 +129,7 @@ function routerSession(Tenant $tenant, ChannelMode $mode, ?array $failover = nul
 it('routes a session to exactly the driver whose mode is the session mode', function (): void {
     $tenant = routerTenant();
     credentialEveryMode($tenant);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     foreach (ChannelMode::cases() as $mode) {
         $session = routerSession($tenant, $mode);
@@ -144,7 +146,7 @@ it('routes a session to exactly the driver whose mode is the session mode', func
 it('resolves the same driver by mode without a session in hand', function (): void {
     $tenant = routerTenant();
     credentialEveryMode($tenant);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     // The shape task 7.6's health check and task 9.1's pre-live registration need.
     expect($router->driverForMode(ChannelMode::CloudApi, $tenant)->mode())->toBe(ChannelMode::CloudApi)
@@ -158,13 +160,13 @@ it('routes the default mode for a tenant that has configured nothing at all', fu
     $session = routerSession($tenant, ChannelMode::Baileys);
 
     expect(app(ChannelCredentialStore::class)->rowFor($tenant, ChannelMode::Baileys))->toBeNull()
-        ->and(probeRouter()->driverFor($session)->mode())->toBe(ChannelMode::Baileys);
+        ->and(fakeRouter()->driverFor($session)->mode())->toBe(ChannelMode::Baileys);
 });
 
 it('refuses a mode with no usable credentials instead of rerouting it to the default', function (): void {
     $tenant = routerTenant();
     $session = routerSession($tenant, ChannelMode::CloudApi);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     // The reroute this refusal prevents would put a brand's official, template-approved
     // traffic on an unregistered WhatsApp Web number — a Property 22 violation whose only
@@ -172,8 +174,8 @@ it('refuses a mode with no usable credentials instead of rerouting it to the def
     expect(fn (): ChannelDriver => $router->driverFor($session))
         ->toThrow(ChannelCredentialException::class, 'cannot send')
         // ...and nothing was resolved in its place.
-        ->and(RouterProbeDriver::built(ChannelMode::Baileys))->toBe(0)
-        ->and(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(0);
+        ->and(FakeChannelDriver::built(ChannelMode::Baileys))->toBe(0)
+        ->and(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(0);
 });
 
 it('refuses a mode whose credential set exists but is not usable', function (): void {
@@ -188,7 +190,7 @@ it('refuses a mode whose credential set exists but is not usable', function (): 
 
     $session = routerSession($tenant, ChannelMode::CloudApi);
 
-    expect(fn (): ChannelDriver => probeRouter()->driverFor($session))
+    expect(fn (): ChannelDriver => fakeRouter()->driverFor($session))
         ->toThrow(ChannelCredentialException::class);
 });
 
@@ -198,7 +200,7 @@ it('refuses a mode no driver is registered for, rather than substituting one', f
     $session = routerSession($tenant, ChannelMode::CloudApi);
 
     // A deployment defect (tasks 7.1–7.5 register the entries), reported as one.
-    expect(fn (): ChannelDriver => probeRouter(ChannelMode::Baileys)->driverFor($session))
+    expect(fn (): ChannelDriver => fakeRouter(ChannelMode::Baileys)->driverFor($session))
         ->toThrow(LogicException::class, 'No channel driver is registered for mode [CLOUD_API]');
 });
 
@@ -211,7 +213,7 @@ it('refuses a mode no driver is registered for, rather than substituting one', f
 it('hands out every driver wrapped in the mode guard, on every path', function (): void {
     $tenant = routerTenant(['channel_failover' => true]);
     credentialEveryMode($tenant);
-    $router = probeRouter();
+    $router = fakeRouter();
     $session = routerSession($tenant, ChannelMode::CloudApi, [ChannelMode::Baileys]);
 
     $wrapped = [
@@ -243,7 +245,7 @@ it('refuses to resolve a driver for another tenant\'s session, before reading an
     credentialEveryMode($globex);
 
     $session = routerSession($globex, ChannelMode::CloudApi, [ChannelMode::Baileys]);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     app(TenantContext::class)->set($acme);
 
@@ -255,7 +257,7 @@ it('refuses to resolve a driver for another tenant\'s session, before reading an
         ->toThrow(CrossTenantAccessException::class)
         // The ownership check is *outermost*: no driver was constructed and no credential row
         // was resolved on behalf of a caller that was about to be refused.
-        ->and(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(0);
+        ->and(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(0);
 
     // ...and the refusal is the router's own, not one it happened to inherit. The relation
     // guard would also refuse `$session->tenant`, and the credential store would refuse the
@@ -285,9 +287,9 @@ it('refuses a foreign tenant even for a mode that needs no credential lookup', f
 
     app(TenantContext::class)->set($acme);
 
-    expect(fn (): ChannelDriver => probeRouter()->driverForMode(ChannelMode::Baileys, $globex))
+    expect(fn (): ChannelDriver => fakeRouter()->driverForMode(ChannelMode::Baileys, $globex))
         ->toThrow(CrossTenantAccessException::class)
-        ->and(RouterProbeDriver::built(ChannelMode::Baileys))->toBe(0);
+        ->and(FakeChannelDriver::built(ChannelMode::Baileys))->toBe(0);
 });
 
 it('resolves for a named tenant when no tenant is bound at all', function (): void {
@@ -299,7 +301,7 @@ it('resolves for a named tenant when no tenant is bound at all', function (): vo
 
     app(TenantContext::class)->forget();
 
-    expect(probeRouter()->driverFor($session)->mode())->toBe(ChannelMode::CloudApi);
+    expect(fakeRouter()->driverFor($session)->mode())->toBe(ChannelMode::CloudApi);
 });
 
 /*
@@ -313,7 +315,7 @@ it('resolves a driver once per tenant and mode, and not once per call', function
     $globex = routerTenant();
     credentialEveryMode($acme);
     credentialEveryMode($globex);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     $acmeSession = routerSession($acme, ChannelMode::CloudApi);
     $globexSession = routerSession($globex, ChannelMode::CloudApi);
@@ -323,22 +325,22 @@ it('resolves a driver once per tenant and mode, and not once per call', function
     $router->driverForMode(ChannelMode::CloudApi, $acme);
 
     // One instance for Acme's Cloud API...
-    expect(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(1);
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(1);
 
     // ...and a second tenant gets its own, because a driver is bound to one tenant's
     // credentials.
     $router->driverFor($globexSession);
-    expect(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(2);
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(2);
 
     // The seam task 7.6 and task 8.6 need after changing what a resolution would answer.
     $router->forget($acme, ChannelMode::CloudApi);
     $router->driverFor($acmeSession);
-    expect(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(3);
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(3);
 
     // A fresh unit of work re-resolves: the memo is per instance, and the binding is
     // `scoped()`, so nothing survives the request or the job.
-    probeRouter()->driverFor($acmeSession);
-    expect(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(4);
+    fakeRouter()->driverFor($acmeSession);
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(4);
 });
 
 it('binds the router scoped, so no driver survives a unit of work', function (): void {
@@ -366,7 +368,7 @@ it('returns a one-element chain for an unconfigured session, never an empty one'
     credentialEveryMode($tenant);
     $session = routerSession($tenant, ChannelMode::CloudApi);
 
-    $chain = probeRouter()->failoverChain($session);
+    $chain = fakeRouter()->failoverChain($session);
 
     // design § 2.6: the default is no failover. A one-element chain means task 8.5's advance
     // loop needs no "not configured" special case.
@@ -387,7 +389,7 @@ it('puts the session\'s own mode at the head, whatever the stored list says', fu
 
     $modes = array_map(
         static fn (ChannelDriver $driver): string => $driver->mode()->value,
-        probeRouter()->failoverChain($session),
+        fakeRouter()->failoverChain($session),
     );
 
     // Head is the primary; the stored order is preserved for the rest; the primary is not
@@ -407,7 +409,7 @@ it('attempts each distinct mode at most once', function (): void {
 
     $modes = array_map(
         static fn (ChannelDriver $driver): string => $driver->mode()->value,
-        probeRouter()->failoverChain($session),
+        fakeRouter()->failoverChain($session),
     );
 
     expect($modes)->toBe(['CLOUD_API', 'BAILEYS', 'ON_PREMISE'])
@@ -425,7 +427,7 @@ it('skips a stored mode this release does not know, rather than failing the disp
 
     $modes = array_map(
         static fn (ChannelDriver $driver): string => $driver->mode()->value,
-        probeRouter()->failoverChain($session),
+        fakeRouter()->failoverChain($session),
     );
 
     expect($modes)->toBe(['CLOUD_API', 'BAILEYS']);
@@ -444,7 +446,7 @@ it('omits a fallback mode the tenant cannot authenticate as', function (): void 
 
     $modes = array_map(
         static fn (ChannelDriver $driver): string => $driver->mode()->value,
-        probeRouter()->failoverChain($session),
+        fakeRouter()->failoverChain($session),
     );
 
     // A fallback that cannot authenticate is not a fallback — and refusing the whole
@@ -459,7 +461,7 @@ it('still refuses when the primary mode of a configured chain is unusable', func
     // The asymmetry, stated as a test: lenient for a hop, strict for the primary. A chain is
     // not a way to get a send out on a half-configured primary — that would be the reroute
     // Property 22 forbids, with extra steps.
-    expect(fn (): array => probeRouter()->failoverChain($session))
+    expect(fn (): array => fakeRouter()->failoverChain($session))
         ->toThrow(ChannelCredentialException::class);
 });
 
@@ -468,7 +470,7 @@ it('collapses the chain to the primary when the plan does not include failover',
     credentialEveryMode($tenant);
     $session = routerSession($tenant, ChannelMode::CloudApi, [ChannelMode::Baileys, ChannelMode::OnPremise]);
 
-    expect(probeRouter()->failoverChain($session))->toHaveCount(1);
+    expect(fakeRouter()->failoverChain($session))->toHaveCount(1);
 
     // Read on every call, so granting the entitlement takes effect without touching the
     // stored chain...
@@ -477,14 +479,14 @@ it('collapses the chain to the primary when the plan does not include failover',
     $plan->forceFill(['features' => ['channel_failover' => true]])->save();
     Cache::flush();
 
-    expect(probeRouter()->failoverChain($session))->toHaveCount(3);
+    expect(fakeRouter()->failoverChain($session))->toHaveCount(3);
 
     // ...and revoking it collapses every session's chain immediately, rather than leaving a
     // configured one live for the rest of the billing period.
     $plan->forceFill(['features' => ['channel_failover' => false]])->save();
     Cache::flush();
 
-    expect(probeRouter()->failoverChain($session))->toHaveCount(1);
+    expect(fakeRouter()->failoverChain($session))->toHaveCount(1);
 });
 
 it('denies failover to a tenant with no plan at all', function (): void {
@@ -493,7 +495,7 @@ it('denies failover to a tenant with no plan at all', function (): void {
 
     // `PlanGate` fails closed on a planless tenant, and the router inherits that rather than
     // treating "no plan" as "no restriction".
-    expect(probeRouter()->failoverChain($session))->toHaveCount(1);
+    expect(fakeRouter()->failoverChain($session))->toHaveCount(1);
 });
 
 /*
@@ -506,7 +508,7 @@ it('refuses an unsupported capability before any driver is built or any query is
     $tenant = routerTenant();
     credentialEveryMode($tenant);
     $session = routerSession($tenant, ChannelMode::CloudApi);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     $queries = 0;
     DB::listen(function () use (&$queries): void {
@@ -522,14 +524,14 @@ it('refuses an unsupported capability before any driver is built or any query is
         // The ordering *is* the guarantee: an operation the mode refuses must have no side
         // effect at all — no provider call, no breaker sample, no decrypted secret in memory.
         ->and($queries)->toBe(0)
-        ->and(RouterProbeDriver::built(ChannelMode::CloudApi))->toBe(0);
+        ->and(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(0);
 });
 
 it('allows a native capability and a conditional one, and reports which is which', function (): void {
     $tenant = routerTenant();
     credentialEveryMode($tenant);
     $session = routerSession($tenant, ChannelMode::CloudApi);
-    $router = probeRouter();
+    $router = fakeRouter();
 
     $router->assertSupported($session, ChannelCapability::SendSingle);
     // ⚠️ does not throw: the 24-hour window and the approved-template rule are task 8.4's,
@@ -542,7 +544,7 @@ it('allows a native capability and a conditional one, and reports which is which
 });
 
 it('gates every cell of the matrix the way the session\'s mode does', function (): void {
-    $router = probeRouter();
+    $router = fakeRouter();
 
     foreach (ChannelMode::cases() as $mode) {
         $session = new Session(['channel_mode' => $mode]);
