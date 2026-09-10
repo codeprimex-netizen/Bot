@@ -10,8 +10,12 @@ use App\Services\Channel\BaileysChannelDriver;
 use App\Services\Channel\ChannelCredentialStore;
 use App\Services\Channel\ChannelDriver;
 use App\Services\Channel\ChannelRouter;
+use App\Services\Channel\CloudApiChannelDriver;
 use App\Services\Channel\DatabaseChannelCredentialStore;
 use App\Services\Channel\DefaultChannelRouter;
+use App\Services\Channel\ProviderCallGuard;
+use App\Services\Reliability\CircuitBreaker;
+use App\Services\Reliability\RetryPolicy;
 use App\Services\Tenancy\PlanGate;
 use App\Services\Tenancy\TenantContext;
 use Closure;
@@ -51,8 +55,9 @@ use Illuminate\Support\ServiceProvider;
  * mis-keyed entry in an environment-driven map would be a live cross-mode routing bug — a
  * tenant's official traffic leaving through another backend's credentials.
  *
- * `BAILEYS` is registered (task 7.1); the three official modes are tasks 7.2–7.4 and each adds
- * exactly one line. Until then the router says so loudly: resolving a mode with no entry raises
+ * `BAILEYS` (task 7.1) and `CLOUD_API` (task 7.2) are registered; `ON_PREMISE` and
+ * `BSP_GATEWAY` are tasks 7.3–7.4 and each adds exactly one line. Until then the router says so
+ * loudly: resolving a mode with no entry raises
  * `LogicException` naming the mode and listing what is registered, rather than substituting a
  * default backend — so an unfinished mode is a deployment defect reported as one, never a
  * tenant's official traffic quietly leaving through the Baileys bridge.
@@ -67,6 +72,8 @@ class ChannelServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        $this->registerProviderGuard();
+
         $this->app->scoped(
             ChannelCredentialStore::class,
             fn (Application $app): ChannelCredentialStore => new DatabaseChannelCredentialStore(
@@ -109,9 +116,43 @@ class ChannelServiceProvider extends ServiceProvider
     {
         return [
             ChannelMode::Baileys->value => fn (): ChannelDriver => $app->make(BaileysChannelDriver::class),
-            // Task 7.2: ChannelMode::CloudApi->value   => fn (): ChannelDriver => $app->make(CloudApiChannelDriver::class),
+            ChannelMode::CloudApi->value => fn (): ChannelDriver => $app->make(CloudApiChannelDriver::class),
             // Task 7.3: ChannelMode::OnPremise->value  => fn (): ChannelDriver => $app->make(OnPremiseChannelDriver::class),
             // Task 7.4: ChannelMode::BspGateway->value => fn (): ChannelDriver => $app->make(BspGatewayChannelDriver::class),
         ];
+    }
+
+    /**
+     * The circuit breaker + bounded inline retry every **official** driver shares.
+     *
+     * A singleton because it holds nothing per tenant: the breaker identity is an argument
+     * (`ProviderCallGuard::breakerName($mode, $tenantId)`), not state, so one instance cannot
+     * carry one tenant's breaker into another tenant's job — the property that makes the
+     * `scoped()` bindings above necessary and this one safe.
+     *
+     * Registered here rather than left to autowiring for one reason: the attempt budget and the
+     * inline delay cap are operator knobs (`wa.channel.guard`), and an autowired instance would
+     * silently use the compiled-in defaults while the config keys sat there looking effective.
+     * The fallbacks are the class's own constants, so a deleted key degrades to a working guard.
+     *
+     * Tasks 7.3 and 7.4 receive the same instance by constructor injection and inherit the whole
+     * policy — the breaker family, the budget, the fail-closed conversion — without restating it.
+     */
+    private function registerProviderGuard(): void
+    {
+        $this->app->singleton(
+            ProviderCallGuard::class,
+            fn (Application $app): ProviderCallGuard => new ProviderCallGuard(
+                $app->make(CircuitBreaker::class),
+                $app->make(RetryPolicy::class),
+                self::intValue(config('wa.channel.guard.attempts'), ProviderCallGuard::DEFAULT_ATTEMPTS),
+                self::intValue(config('wa.channel.guard.max_delay_ms'), ProviderCallGuard::DEFAULT_MAX_DELAY_MS),
+            ),
+        );
+    }
+
+    private static function intValue(mixed $value, int $default): int
+    {
+        return is_numeric($value) && (int) $value > 0 ? (int) $value : $default;
     }
 }

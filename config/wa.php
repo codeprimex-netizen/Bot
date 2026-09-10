@@ -7,6 +7,7 @@ use App\Enums\ErrorClass;
 use App\Enums\QuotaKind;
 use App\Enums\TenantTier;
 use App\Services\Bridge\BridgeErrorClassifier;
+use App\Services\Channel\CloudApiErrorClassifier;
 use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
 use App\Services\Reliability\HttpOutboxTransport;
 use App\Services\Security\ConfigMasterKeyWrapper;
@@ -99,6 +100,80 @@ return [
             // five attempts on jittered backoff).
             'attempts' => (int) env('WA_BRIDGE_ATTEMPTS', 2),
             'max_delay_ms' => (int) env('WA_BRIDGE_MAX_DELAY_MS', 250),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Channel Mode — the official backends' endpoints (Req 8.1, 8.5 / A8)
+    |--------------------------------------------------------------------------
+    | Deployment-level facts about the *providers*, not about a tenant: an API
+    | host, a version, a timeout. Everything tenant-specific — WABA id,
+    | phone-number id, access token, verify token, app secret — lives in
+    | `channel_credentials`, envelope-encrypted (design § Channel Mode 2.7), and
+    | **nothing here can substitute for it**: a mode whose credentials are absent
+    | cannot be selected, and the platform keeps working on `BAILEYS`
+    | (Req 8.13 / A8).
+    |
+    | There is deliberately **no driver-selection key** here, for the reason
+    | `BridgeServiceProvider` gives about the bridge: which backend serves a mode
+    | is a property of the platform (`ChannelServiceProvider::drivers()`), and the
+    | pluggable axis is `sessions_wa.channel_mode` per session — a container-wide
+    | swap key would be a second, competing way to choose a backend.
+    |
+    | Nothing here can widen the capability matrix (`ChannelCapability`) or turn
+    | off the anti-ban gate on a web-protocol mode (Req 8.8): both are code, with
+    | no bypass parameter.
+    */
+    'channel' => [
+
+        /*
+        |----------------------------------------------------------------------
+        | Meta WhatsApp Cloud API (task 7.2)
+        |----------------------------------------------------------------------
+        | Read by `App\Services\Channel\CloudApiChannelDriver` and by nothing
+        | else. Every value has a compiled-in fallback in that class, so deleting
+        | a key degrades to a working driver rather than to a malformed URL.
+        */
+        'cloud_api' => [
+            // The Graph API host. Configurable for a sandbox or a regional edge,
+            // never per tenant: a tenant-supplied host would be a way to point a
+            // tenant's own access token at somebody else's server.
+            'base_url' => env('WA_CLOUD_API_BASE_URL', 'https://graph.facebook.com'),
+
+            // The Graph API version every URL carries. A tenant may pin an older
+            // one in its credentials' `api_version`; this is the default when it
+            // has not. Meta supports a version for about two years, so this moves
+            // on a release cadence rather than an incident one.
+            'api_version' => env('WA_CLOUD_API_VERSION', 'v21.0'),
+
+            // Seconds for the whole request, and for the connection alone. Bounded
+            // for `HttpBridgeClient`'s reason: a hanging read is a stalled worker,
+            // and the queue lease has to outlive the whole attempt.
+            'timeout' => (int) env('WA_CLOUD_API_TIMEOUT', 15),
+            'connect_timeout' => (int) env('WA_CLOUD_API_CONNECT_TIMEOUT', 5),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | The provider network seam (Req 31.1, 31.3 / NFR2)
+        |----------------------------------------------------------------------
+        | `App\Services\Channel\ProviderCallGuard` — a circuit breaker per
+        | `(mode, tenant)` composed with a bounded inline retry, shared by every
+        | official driver. The same two knobs as `bridge.guard`, and deliberately
+        | as small: this waits inside the request or job that asked, and the real
+        | budget is the queue's (`ErrorClass::RateLimit` defers eight times
+        | honouring Meta's own `Retry-After`).
+        |
+        | Unlike `bridge.guard` there is **no `enabled` flag**. The bridge's exists
+        | for a deployment that fences its own egress to a local sidecar; an
+        | official provider is somebody else's internet-facing API, and a
+        | deployment that could switch its breaker off would have no way to stop
+        | hammering an account Meta has rate-limited.
+        */
+        'guard' => [
+            'attempts' => (int) env('WA_CHANNEL_GUARD_ATTEMPTS', 2),
+            'max_delay_ms' => (int) env('WA_CHANNEL_GUARD_MAX_DELAY_MS', 250),
         ],
     ],
 
@@ -1017,6 +1092,16 @@ return [
                 // `422 not_on_whatsapp` fails fast. Returns null for anything that is
                 // not a bridge exception, so the chain continues.
                 BridgeErrorClassifier::class,
+
+                // Meta Cloud API refusals (task 7.2). Reads Meta's `error.code`
+                // before the HTTP status, which matters more here than on the bridge:
+                // Cloud API returns **400** for a throughput limit (`130429`), so a
+                // status-first reading would fail a send fast that would have
+                // succeeded a minute later. An invalid token (`190`) is `AUTH` and is
+                // never retried. It checks the failure's `mode` first and returns null
+                // for the other official modes, whose error numbers collide with
+                // Meta's — tasks 7.3 and 7.4 add one classifier each, here.
+                CloudApiErrorClassifier::class,
             ],
         ],
 
