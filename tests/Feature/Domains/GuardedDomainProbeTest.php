@@ -55,14 +55,31 @@ it('passes a successful lookup straight through', function (): void {
 it('gives up inside a clamped budget rather than sleeping the caller out', function (): void {
     $probe = (new FakeDomainProbe)->unavailable();
 
+    /** @var list<float> $waits */
+    $waits = [];
+
+    Sleep::whenFakingSleep(function (CarbonInterval $duration) use (&$waits): void {
+        $waits[] = $duration->totalMilliseconds;
+    });
+
     expect(fn (): array => guardedProbe($probe, attempts: 3)->txtRecords('acme.example'))
         ->toThrow(DomainProbeUnavailableException::class)
         ->and($probe->calls('txtRecords'))->toBe(3);
 
-    // Two waits, one per retry, each clamped — a lookup on a verification screen must not
-    // inherit a queue-sized backoff.
-    Sleep::assertSleptTimes(2);
-    Sleep::assertSlept(fn (CarbonInterval $duration): bool => $duration->totalMilliseconds <= 250, 2);
+    /*
+    | At most one wait per retry, and not one of them longer than the clamp — a lookup on a
+    | verification screen must not inherit a queue-sized backoff.
+    |
+    | *At most*, rather than exactly two: full jitter draws from the whole window **including
+    | 0** (see `App\Enums\BackoffShape`), and `GuardedDomainProbe::wait()` does not sleep a
+    | zero wait at all, so "two sleeps" is a draw this assertion loses about one run in five
+    | hundred. Nothing is given up by bounding the count instead — that the retries happened
+    | is asserted above on the probe's own call count, which is what a missing retry loop
+    | would break, and the clamp is asserted below on every wait that did occur.
+    */
+    expect(count($waits))->toBeLessThanOrEqual(2, 'the retry loop waited more often than it retried.');
+
+    Sleep::assertSlept(fn (CarbonInterval $duration): bool => $duration->totalMilliseconds > 250, times: 0);
 });
 
 it('stops attempting lookups once the breaker is open', function (): void {

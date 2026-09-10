@@ -53,6 +53,13 @@ use Throwable;
  * the attempt is counted before it is made, so a row that repeatedly kills its worker
  * exhausts its budget and parks instead of poisoning the queue for ever.
  *
+ * It also has a consequence the relay has to own. A worker that dies between the claim and
+ * the outcome write spends an attempt and records nothing, so a row can run out of budget
+ * without any path in this class ever having written a failure for it — leaving a `PENDING`
+ * row that no claim will take again and no parked-row query will find. `reapAbandoned()`
+ * runs before every claim and parks exactly those rows, which is what keeps "parked" the
+ * only way a row can stop moving.
+ *
  * ## Crash semantics — the exactly-once part
  *
  * ```
@@ -184,7 +191,15 @@ final readonly class DatabaseOutbox implements Outbox
     public function relayBatch(?int $batch = null): OutboxRelayReport
     {
         $report = new OutboxRelayReport;
-        $claimed = $this->claim($this->batchSize($batch));
+        $size = $this->batchSize($batch);
+
+        // Before claiming: park the rows whose budget was spent by claims nothing ever came
+        // back from, so the parking they are already subject to is stated rather than
+        // implied. See `reapAbandoned()` — this is the other half of counting the attempt at
+        // claim time.
+        $report->recordAbandoned($this->reapAbandoned($size));
+
+        $claimed = $this->claim($size);
 
         $report->recordClaimed($claimed->count());
 
@@ -295,6 +310,84 @@ final readonly class DatabaseOutbox implements Outbox
         );
 
         return $claimed;
+    }
+
+    /**
+     * Park the rows whose attempt budget was spent by claims that never reported an outcome.
+     *
+     * ## The state this repairs, and why nothing else can
+     *
+     * `attempts` is incremented at claim time, so a worker killed *between* the claim and
+     * the outcome write (OOM, SIGKILL, a deploy that does not drain) spends an attempt and
+     * records nothing. Let that happen until the budget is gone and the row lands in the one
+     * state no path in this class intends: `PENDING`, `attempts >= max_attempts`, its lease
+     * expired. The claim's parking predicate then holds it out of every future pass — so it
+     * *is* parked — while the row itself still reads as "enqueued, never attempted, due
+     * now": not `FAILED`, so it is absent from every parked-row query an operator would
+     * write, and carrying either no `last_error` at all or one left by a shed, which
+     * describes a call that was never even made. Nobody will ever look at it and nothing
+     * will ever deliver it, which is precisely the silent non-delivery Req 31.4 forbids,
+     * arriving through the door that counting the attempt early leaves open.
+     *
+     * The dead worker cannot write that outcome, so the next live pass writes it for it:
+     * one indexed query before each claim turns the implicit parking into `park()`'s
+     * explicit kind — `FAILED`, budget spent, gate at the dedup deadline, and a reason in
+     * the operator's words.
+     *
+     * ## Why only `PENDING`, and why this can never overwrite a diagnosis
+     *
+     * `PENDING` is written by `record()` and by `requeue()` and by nothing else; every
+     * outcome inside the relay writes `SENT` or `FAILED`. A `PENDING` row with a spent
+     * budget is therefore, by construction, a row whose whole budget went on attempts that
+     * reported nothing — which is what makes the reason written below true of every row this
+     * claims, rather than a guess. A row already marked `FAILED` is left alone even when its
+     * budget was spent the same way: it carries its own last recorded failure and already
+     * reads as the parked signature, so rewriting its `last_error` would cost an operator
+     * the diagnosis and buy nothing.
+     *
+     * That is also what makes the repair a one-shot: a reaped row is `FAILED`, so it is no
+     * longer a candidate, and no later pass rescans it.
+     *
+     * ## The lease is what tells a dead worker from a slow one
+     *
+     * A row claimed for its final attempt is `PENDING` with a spent budget too — and it is
+     * *in flight*. Its gate sits `lease_seconds` in the future, so `next_attempt_at <=
+     * now()` is the whole distinction between a worker that is still working and one that is
+     * never coming back. If a lease does expire mid-attempt this write races the live
+     * worker, and that race is already harmless: `persist()` refuses to walk a `SENT` row
+     * back, a subsequent ack overwrites this park with `SENT`, a subsequent failure re-parks
+     * it with the real reason, and the consumer's dedup key covers the delivery either way.
+     *
+     * @return int rows parked
+     */
+    private function reapAbandoned(int $batch): int
+    {
+        if ($batch < 1) {
+            return 0;
+        }
+
+        $maxAttempts = $this->maxAttempts();
+
+        $rows = OutboxMessage::query()
+            ->where('status', OutboxStatus::Pending)         // never attempted, as far as the row says
+            ->where('attempts', '>=', $maxAttempts)          // and yet its whole budget is gone
+            ->where('next_attempt_at', '<=', Carbon::now())  // and the last claim's lease has expired
+            ->orderBy('id')
+            ->limit($batch)
+            ->get();
+
+        foreach ($rows as $row) {
+            $this->park($row, sprintf(
+                'Parked after %d of %d attempts (wa.reliability.outbox.max_attempts), none of which reported an '
+                .'outcome: every claim on this row was made by a worker that did not survive it. The attempt is '
+                .'counted before it is made, so the budget is spent; the row is kept and can be requeued.%s',
+                $row->attempts,
+                $maxAttempts,
+                $row->last_error === null ? '' : ' Last recorded: '.$row->last_error,
+            ));
+        }
+
+        return $rows->count();
     }
 
     /*

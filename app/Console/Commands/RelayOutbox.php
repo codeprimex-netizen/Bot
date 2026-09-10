@@ -36,10 +36,13 @@ use Illuminate\Console\Command;
  *
  * ## The numbers it prints
  *
- * `delivered` / `retrying` / `parked` / `shed` account for every claimed row. Two of them
+ * `delivered` / `retrying` / `parked` / `shed` account for every claimed row. Three numbers
  * are worth alerting on: **parked** rows are effects that will not be delivered without a
- * human (`--requeue`), and **raced** deliveries mean a lease expired while its attempt was
- * still running, so the transport is slower than `wa.reliability.outbox.lease_seconds`.
+ * human (`--requeue`); **abandoned** rows are ones whose whole budget was spent by claims
+ * that never reported an outcome, i.e. workers dying mid-attempt, and this pass parked them
+ * so they stop being invisible; and **raced** deliveries mean a lease expired while its
+ * attempt was still running, so the transport is slower than
+ * `wa.reliability.outbox.lease_seconds`.
  */
 final class RelayOutbox extends Command
 {
@@ -165,6 +168,16 @@ final class RelayOutbox extends Command
                 '%d row(s) parked: kept, never dropped, but nothing will deliver them until an operator requeues '
                 .'them (php artisan wa:outbox:relay --requeue=<id>). Read outbox.last_error first.',
                 $report->parked(),
+            ));
+        }
+
+        if ($report->abandoned() > 0) {
+            $this->components->warn(sprintf(
+                '%d row(s) had their whole attempt budget spent by claims that never reported an outcome, and have '
+                .'been parked so they are visible: a relay worker is being killed mid-attempt (OOM, a deploy that '
+                .'does not drain, or wa.reliability.outbox.lease_seconds shorter than the transport timeout). The '
+                .'effects were not delivered — requeue them once the worker stops dying.',
+                $report->abandoned(),
             ));
         }
 

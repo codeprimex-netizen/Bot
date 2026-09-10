@@ -50,7 +50,8 @@ use Tests\Fixtures\Reliability\RecordingOutboxTransport;
 |     compared against what the fault drawn for it licensed: an ack is `SENT`, a shed leaves
 |     the budget *intact*, a failure with budget left is `FAILED` on the policy's gate, a
 |     failure without it is parked with its budget burnt, an unclaimed row is untouched to
-|     the microsecond, and a leased row is invisible. A relay that reached the same
+|     the microsecond unless its budget is spent and its lease expired — in which case it
+|     must be parked — and a leased row is invisible. A relay that reached the same
 |     end-state by a different route fails here.
 |  3. **Two invariants after every single pass**, which is where Req 31.4 lives: for every
 |     dedup key `applied() === 1` if the effect was ever acked and `0` if it never was —
@@ -60,17 +61,31 @@ use Tests\Fixtures\Reliability\RecordingOutboxTransport;
 |     drained to `SENT` at the end, and the effect it may already have applied before parking
 |     is still applied exactly once afterwards.
 |
-| ## One thing the generated interleavings turned up
+| ## What the generated interleavings turned up
 |
 | A row can have its **last** attempt counted by a claim whose worker then died. Its budget
 | is spent, so it is held out of the claim exactly as a parked row is — but nothing inside
-| the relay failed, so `last_error` still holds the failure before it rather than a "Parked"
-| explanation. That is the documented consequence of counting the attempt at claim time (a
-| row that kills its worker must exhaust its budget rather than poison the queue for ever),
-| and it costs nothing that Req 31.4 asks for: the row is kept, it is visible, `requeue()`
-| takes it, and the effect is still applied exactly once afterwards. The oracle below
-| therefore requires the "Parked" wording only of the rows that actually failed an attempt
-| inside the relay, and requires *some* recorded reason of all of them.
+| the relay failed, so nothing wrote `FAILED` or a reason. That is the consequence of
+| counting the attempt at claim time (a row that kills its worker must exhaust its budget
+| rather than poison the queue for ever), and it has two shapes:
+|
+|  - the row had already failed at least once, so it is `FAILED` with the previous failure in
+|    `last_error` — visibly out of the queue with its budget spent, which is the parked
+|    signature an operator reads, and a diagnosis the relay is right not to overwrite;
+|  - the row had **never** failed, so it was still `PENDING`. Which is a row nothing will
+|    ever claim again (the claim's `attempts < max_attempts` predicate) that nonetheless
+|    reads as "enqueued, never attempted, due now": absent from every parked-row query, with
+|    no reason recorded, and never delivered. That is silent non-delivery, and this file
+|    caught it at seed 7517875994292234202 — three claims killed mid-flight spent one row's
+|    whole budget of 3 without a single failure inside the relay.
+|
+| The relay now repairs the second shape: `DatabaseOutbox::reapAbandoned()` runs before every
+| claim and parks the rows whose budget is spent, whose lease has expired and which are still
+| `PENDING`, which is a state nothing but a run of unreported claims can produce. So the
+| oracle below requires of *every* undelivered row that it end `FAILED`, with its budget
+| spent, with a reason, and — with the single exception of the first shape above, which is
+| both `heldToDeath` and `everFailed` — with the "Parked" wording. Parking a row it did not
+| claim is also the only change a pass is allowed to make to a row it did not attempt.
 |
 | ## Anti-vacuity
 |
@@ -301,6 +316,17 @@ it('applies an acked effect exactly once and loses no row across random crash an
     */
     $heldToDeath = [];
 
+    /*
+    | Rows that have failed an attempt *inside* the relay, as id => true — i.e. the rows
+    | that own a `last_error` the relay is not entitled to overwrite. Together with
+    | `$heldToDeath` this is exactly the set the end-state oracle excuses from the "Parked"
+    | wording, and nothing wider: a row that never failed in the relay has no diagnosis to
+    | preserve, so it must say why it is parked whatever spent its budget.
+    |
+    | @var array<int, true>
+    */
+    $everFailed = [];
+
     foreach (range(1, $passes) as $pass) {
         if ($pass >= $faultFreeFrom) {
             // Faults off from a drawn pass onwards — the opening schedule still finishes, so
@@ -369,10 +395,12 @@ it('applies an acked effect exactly once and loses no row across random crash an
         ));
 
         $innerClaimed = 0;
+        $innerAbandoned = 0;
 
         foreach ($probe->passConcurrentReports() as $inner) {
             expect($inner->isBalanced())->toBeTrue($where.': the concurrent pass lost track of a claimed row.');
             $innerClaimed += $inner->claimed();
+            $innerAbandoned += $inner->abandoned();
         }
 
         // One attempt per claimed row, and no more: nothing was claimed and then skipped.
@@ -420,6 +448,9 @@ it('applies an acked effect exactly once and loses no row across random crash an
             $entries[$entry['id']] = $entry;
         }
 
+        // Rows this pass parked without claiming them, for the bookkeeping check below.
+        $reaped = [];
+
         foreach ($before as $id => $was) {
             $row = $after[$id];
             $entry = $entries[$id] ?? null;
@@ -434,8 +465,39 @@ it('applies an acked effect exactly once and loses no row across random crash an
             );
 
             if ($entry === null && ! $held) {
+                /*
+                | Abandoned, not merely unclaimed: `PENDING` with its whole budget spent and
+                | its lease expired, which only a run of claims that reported nothing can
+                | produce. No claim will ever take it again, so the relay parks it on sight
+                | (`DatabaseOutbox::reapAbandoned()`) — and parking a row it did not attempt
+                | is the *only* change a pass may make to one.
+                */
+                $abandoned = $was->status === OutboxStatus::Pending
+                    && $was->attempts >= $maxAttempts
+                    && ! $was->next_attempt_at->isFuture();
+
+                if ($abandoned && $row->status === OutboxStatus::Failed) {
+                    expect($row->attempts)->toBe(
+                        $was->attempts,
+                        $rowWhere.': parking an abandoned row spent an attempt it never made.',
+                    )
+                        ->and($row->sent_at)->toBeNull($rowWhere.': a parked row recorded a delivery instant.')
+                        ->and($row->last_error)->toContain('Parked')
+                        ->and($row->isClaimable())->toBeFalse($rowWhere.': a parked row is still claimable.')
+                        ->and($transport->applied($was->dedup_key))->toBe(
+                            $appliedBefore[$was->dedup_key],
+                            $rowWhere.': parking a row applied its effect.',
+                        );
+
+                    $reaped[] = $id;
+
+                    continue;
+                }
+
                 // Never claimed: untouched. A relay that quietly re-gated or re-statused a
-                // row it did not attempt would be losing track of somebody's effect.
+                // row it did not attempt would be losing track of somebody's effect. An
+                // abandoned row the batch limit did not reach lands here too — leaving it for
+                // the next pass is the one other thing the relay may do with it.
                 expect($row->status)->toBe($was->status, $rowWhere.': an unclaimed row changed status.')
                     ->and($row->attempts)->toBe($was->attempts, $rowWhere.': an unclaimed row spent an attempt.')
                     ->and($row->next_attempt_at->equalTo($was->next_attempt_at))->toBeTrue(
@@ -517,6 +579,11 @@ it('applies an acked effect exactly once and loses no row across random crash an
 
             $keepsGoing = $attempt < $budgets[$fault] && $attempt < $maxAttempts;
 
+            // This row has now failed *inside* the relay, so it has a diagnosis of its own
+            // that the relay must never overwrite — which is what the end-state oracle's one
+            // exemption is about.
+            $everFailed[$id] = true;
+
             expect($row->status)->toBe(OutboxStatus::Failed, $rowWhere.': a failed attempt left the row unmarked.')
                 ->and($row->sent_at)->toBeNull($rowWhere.': a failed attempt recorded a delivery instant.')
                 ->and($row->last_error)->not->toBeNull($rowWhere.': a failed attempt recorded no reason.');
@@ -546,6 +613,20 @@ it('applies an acked effect exactly once and loses no row across random crash an
                 : expect($row->next_attempt_at->betweenIncluded(Carbon::now(), Carbon::now()->addSeconds(31)))
                     ->toBeTrue($rowWhere.': the backoff gate is outside the policy window.');
         }
+
+        // The other half of the bookkeeping: a pass reports every row it parked without
+        // claiming, and parks none it did not report. `abandoned` is deliberately outside
+        // `isBalanced()` — those rows were never claimed — so this is what keeps it honest.
+        expect(count($reaped))->toBe(
+            $report->abandoned() + $innerAbandoned,
+            sprintf(
+                '%s: the pass parked %d abandoned row(s) and reported %d — %s.',
+                $where,
+                count($reaped),
+                $report->abandoned() + $innerAbandoned,
+                (string) json_encode($report->toArray()),
+            ),
+        );
 
         /*
         |----------------------------------------------------------------------
@@ -643,12 +724,21 @@ it('applies an acked effect exactly once and loses no row across random crash an
             ->and($row->attempts)->toBe($maxAttempts, $where.': an undelivered row kept an unspent budget.')
             ->and($row->last_error)->not->toBeNull($where.': an undelivered row records no reason at all.');
 
-        // A row whose last attempt failed *inside* the relay must say so in the operator's
-        // words. A row whose budget was spent by a claim that never came back cannot: the
-        // attempt is counted before it is made (which is what stops a row that kills its
-        // worker from being retried for ever), so what `last_error` holds is the failure
-        // before it.
-        if (! isset($heldToDeath[$id])) {
+        /*
+        | And it says so in the operator's words. Two routes reach that: a last attempt that
+        | failed inside the relay is parked by `park()`, and a budget spent entirely by
+        | claims that reported nothing is parked by `reapAbandoned()` on the next pass —
+        | which is the row this file used to find still `PENDING`.
+        |
+        | Exactly one row cannot: one that *had* failed inside the relay and then had the
+        | rest of its budget spent by claims that never came back. The attempt is counted
+        | before it is made (which is what stops a row that kills its worker from being
+        | retried for ever), so its `last_error` is the failure before them — and the relay
+        | deliberately keeps that diagnosis rather than overwriting it with a generic
+        | parking note. So the exemption needs *both* conditions, and a row that satisfies
+        | only one of them is held to the full claim.
+        */
+        if (! isset($heldToDeath[$id]) || ! isset($everFailed[$id])) {
             expect($row->last_error)->toContain('Parked');
         }
 

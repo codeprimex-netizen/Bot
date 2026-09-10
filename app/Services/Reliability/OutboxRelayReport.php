@@ -19,6 +19,12 @@ namespace App\Services\Reliability;
  * | `shed` | a circuit breaker refused the call, so no attempt was made | claimed again after the cool-down, with its budget intact |
  * | `raced` | delivered, but another worker had already recorded the row as `SENT` | nothing — the consumer dedups on `dedup_key` |
  *
+ * …plus one bucket that is not a claimed row at all:
+ *
+ * | Bucket | Meaning | Next |
+ * |---|---|---|
+ * | `abandoned` | the row's budget was spent by claims that never reported an outcome; this pass parked it | **kept**, and waits for an operator, exactly like `parked` |
+ *
  * The invariant a test can assert is `claimed === delivered + retrying + parked + shed`
  * (`isBalanced()`): no claimed row leaves a pass unaccounted for, which is how Req 31.4's
  * *"never lose the row"* stays checkable rather than merely asserted. `raced` is a
@@ -26,11 +32,20 @@ namespace App\Services\Reliability;
  * it just was not this worker that recorded it — so it is reported alongside the four
  * exclusive outcomes instead of inside the sum.
  *
- * `parked` and `raced` are the two numbers worth an operator's attention. A rising `parked`
- * means effects are queued up that nothing will deliver without a human; a non-zero `raced`
- * means two workers held the same row, i.e. a lease expired mid-attempt — harmless for
- * correctness (the dedup key covers it) and a sign the lease is too short for the
- * transport's timeouts.
+ * `abandoned` is outside the sum for the opposite reason: those rows were **not claimed by
+ * this pass at all**. They are rows whose whole attempt budget was spent by claims that
+ * never reported an outcome — a worker killed between the claim and the write — which
+ * `DatabaseOutbox::reapAbandoned()` parks on sight before claiming, so that the parking they
+ * are already subject to is visible instead of implicit. Adding them to the balance would
+ * make `isBalanced()` false on every pass that repairs one.
+ *
+ * `parked`, `abandoned` and `raced` are the three numbers worth an operator's attention. A
+ * rising `parked` means effects are queued up that nothing will deliver without a human; a
+ * non-zero `abandoned` means relay workers are dying mid-attempt (OOM kills, a deploy that
+ * does not drain, a lease shorter than the transport's timeout) and each one cost a row its
+ * whole budget; a non-zero `raced` means two workers held the same row, i.e. a lease expired
+ * mid-attempt — harmless for correctness (the dedup key covers it) and a sign the lease is
+ * too short for the transport's timeouts.
  */
 final class OutboxRelayReport
 {
@@ -45,6 +60,8 @@ final class OutboxRelayReport
     private int $shed = 0;
 
     private int $raced = 0;
+
+    private int $abandoned = 0;
 
     public function recordClaimed(int $rows = 1): void
     {
@@ -75,6 +92,14 @@ final class OutboxRelayReport
     {
         $this->raced++;
         $this->delivered++;
+    }
+
+    /**
+     * Rows this pass parked without claiming them, because their budget was already spent.
+     */
+    public function recordAbandoned(int $rows = 1): void
+    {
+        $this->abandoned += max(0, $rows);
     }
 
     public function claimed(): int
@@ -110,18 +135,29 @@ final class OutboxRelayReport
         return $this->raced;
     }
 
+    public function abandoned(): int
+    {
+        return $this->abandoned;
+    }
+
     /**
      * Whether the pass found nothing to do — the steady state, and the one case the
      * scheduled command stays quiet about.
+     *
+     * A pass that claimed nothing but parked an abandoned row **did** do something, and
+     * something an operator has to hear about: it is not empty, so the command reports it
+     * rather than returning early.
      */
     public function isEmpty(): bool
     {
-        return $this->claimed === 0;
+        return $this->claimed === 0 && $this->abandoned === 0;
     }
 
     /**
      * Whether every claimed row is accounted for. False can only mean a bug in the relay's
      * own bookkeeping, which is exactly why it is checkable.
+     *
+     * `abandoned` is not in the sum: those rows were never claimed by this pass.
      */
     public function isBalanced(): bool
     {
@@ -139,10 +175,11 @@ final class OutboxRelayReport
         $this->parked += $other->parked;
         $this->shed += $other->shed;
         $this->raced += $other->raced;
+        $this->abandoned += $other->abandoned;
     }
 
     /**
-     * @return array{claimed: int, delivered: int, retrying: int, parked: int, shed: int, raced: int}
+     * @return array{claimed: int, delivered: int, retrying: int, parked: int, shed: int, raced: int, abandoned: int}
      */
     public function toArray(): array
     {
@@ -153,6 +190,7 @@ final class OutboxRelayReport
             'parked' => $this->parked,
             'shed' => $this->shed,
             'raced' => $this->raced,
+            'abandoned' => $this->abandoned,
         ];
     }
 }

@@ -341,6 +341,125 @@ it('parks a row whose attempt budget is spent and hands it back when requeued', 
     expect($row->refresh()->status)->toBe(OutboxStatus::Sent);
 });
 
+it('parks a row whose budget was spent by claims that never reported an outcome', function (): void {
+    config()->set('wa.reliability.outbox.max_attempts', 2);
+    config()->set('wa.reliability.outbox.lease_seconds', 60);
+
+    $transport = RecordingOutboxTransport::acking();
+    $outbox = Outboxes::relayingWith($transport);
+    $row = OutboxMessage::factory()->create(['dedup_key' => 'order.paid:ord-11']);
+
+    /*
+    | A worker killed *between* the claim and the delivery — the one interleaving no
+    | transport double can produce, because the relay catches everything a transport throws.
+    | So it is staged with the relay's own claim statement: the attempt is counted, the lease
+    | is taken, and then nothing ever comes back. Twice, so the whole budget goes that way
+    | and not one failure is ever recorded inside the relay.
+    */
+    foreach ([1, 2] as $ignored) {
+        OutboxMessage::query()
+            ->whereKey($row->getKey())
+            ->increment('attempts', 1, ['next_attempt_at' => now()->addSeconds(60)]);
+
+        Carbon::setTestNow(now()->addSeconds(61));
+    }
+
+    // Where that leaves the row, and why it is the one state nothing will ever look at:
+    // `PENDING`, so absent from every parked-row query an operator would write, with no
+    // reason recorded — and with a spent budget, so no claim will ever take it again.
+    expect($row->refresh()->status)->toBe(OutboxStatus::Pending)
+        ->and($row->attempts)->toBe(2)
+        ->and($row->last_error)->toBeNull();
+
+    $report = $outbox->relayBatch();
+    $row->refresh();
+
+    expect($report->abandoned())->toBe(1)
+        ->and($report->claimed())->toBe(0)
+        ->and($report->isBalanced())->toBeTrue()
+        // A pass that repaired one of these did something an operator has to hear about, so
+        // it is not an empty pass even though it claimed nothing.
+        ->and($report->isEmpty())->toBeFalse()
+        // Repaired, not delivered: the budget really is spent.
+        ->and($transport->deliveryCount())->toBe(0)
+        ->and($row->status)->toBe(OutboxStatus::Failed)
+        ->and($row->attempts)->toBe(2)
+        ->and($row->last_error)->toContain('Parked')
+        ->and($row->last_error)->toContain('did not survive')
+        ->and($row->isClaimable())->toBeFalse();
+
+    // Once and once only: the row is `FAILED` now, so no later pass rescans it — and none
+    // can overwrite the diagnosis of a row that failed for a reason of its own.
+    expect($outbox->relayBatch()->abandoned())->toBe(0);
+
+    // And the operator half of "never lose the row" still works on it.
+    expect($outbox->requeue($row->id))->toBeTrue()
+        ->and($outbox->relay())->toBe(1)
+        ->and($transport->applied('order.paid:ord-11'))->toBe(1);
+});
+
+it("keeps a failed row's own diagnosis when the rest of its budget went the same way", function (): void {
+    config()->set('wa.reliability.outbox.max_attempts', 2);
+
+    $transport = RecordingOutboxTransport::failing(new ConnectionException('connection refused'));
+    $outbox = Outboxes::relayingWith($transport);
+    $row = OutboxMessage::factory()->create();
+
+    // Attempt 1 fails inside the relay, so the row is `FAILED` and says why.
+    $outbox->relayBatch();
+    Carbon::setTestNow(now()->addMinutes(2));
+
+    // Attempt 2 is spent by a worker killed between the claim and the write. The budget is
+    // gone, so no claim will take the row again — but it already reads as the parked
+    // signature (`FAILED` with a spent budget), and the reason it carries is a real failure
+    // of its own. Overwriting that with a generic parking note would cost an operator the
+    // one diagnosis on the row and buy nothing, so the relay leaves it alone.
+    OutboxMessage::query()->whereKey($row->getKey())->increment('attempts', 1, ['next_attempt_at' => now()]);
+
+    $before = $row->refresh()->last_error;
+    $report = $outbox->relayBatch();
+
+    expect($report->abandoned())->toBe(0)
+        ->and($report->claimed())->toBe(0)
+        ->and($report->isEmpty())->toBeTrue()
+        ->and($row->refresh()->status)->toBe(OutboxStatus::Failed)
+        ->and($row->attempts)->toBe(2)
+        ->and($row->last_error)->toBe($before)
+        ->and($row->last_error)->toContain('connection refused');
+});
+
+it('leaves a row whose final attempt is still in flight alone', function (): void {
+    config()->set('wa.reliability.outbox.max_attempts', 1);
+
+    /*
+    | The row a reap must not touch. Its budget is spent (counted at claim time) and it is
+    | still `PENDING` — the same shape as an abandoned row — because its only attempt is in
+    | flight *right now*. The lease is the whole distinction between a worker that is still
+    | working and one that is never coming back, so the re-entrant pass runs from inside the
+    | delivery, which is where a second worker would look.
+    */
+    $inner = null;
+
+    $transport = RecordingOutboxTransport::behaving(
+        function (RecordingOutboxTransport $transport, OutboxDelivery $delivery) use (&$inner): void {
+            $inner ??= app(Outbox::class)->relayBatch();
+
+            $transport->accept($delivery);
+        }
+    );
+
+    $outbox = Outboxes::relayingWith($transport);
+    $row = OutboxMessage::factory()->create(['dedup_key' => 'order.paid:ord-12']);
+
+    $report = $outbox->relayBatch();
+
+    expect($inner?->abandoned())->toBe(0)
+        ->and($report->abandoned())->toBe(0)
+        ->and($row->refresh()->status)->toBe(OutboxStatus::Sent)
+        ->and($row->last_error)->toBeNull()
+        ->and($transport->applied('order.paid:ord-12'))->toBe(1);
+});
+
 it('refuses to requeue a delivered or unknown row', function (): void {
     $outbox = Outboxes::acking();
     $sent = OutboxMessage::factory()->sent()->create();

@@ -98,6 +98,25 @@ it('warns loudly about parked rows and hands one back when asked', function (): 
         ->and($transport->deliveryCount())->toBe(1);
 });
 
+it('warns when a row was parked for having spent its budget on claims that reported nothing', function (): void {
+    config()->set('wa.reliability.outbox.max_attempts', 1);
+
+    Outboxes::acking();
+    $row = OutboxMessage::factory()->create();
+
+    // A worker killed between the claim and the write: the attempt is counted and the lease
+    // taken, and nothing comes back. The budget is spent, so no pass will ever claim the row
+    // again — and until the relay parks it, nothing says so.
+    OutboxMessage::query()->whereKey($row->getKey())->increment('attempts', 1, ['next_attempt_at' => now()]);
+
+    thisTest()->artisan(RelayOutbox::class)
+        ->expectsOutputToContain('abandoned')
+        ->assertSuccessful();
+
+    expect($row->refresh()->status)->toBe(OutboxStatus::Failed)
+        ->and($row->last_error)->toContain('Parked');
+});
+
 it('reports a row it could not requeue instead of pretending it did', function (): void {
     Outboxes::acking();
     $sent = OutboxMessage::factory()->sent()->create();
