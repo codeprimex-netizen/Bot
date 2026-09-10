@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Models\ChannelWebhookRoute;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\IdempotencyKey;
 use App\Models\OutboxMessage;
@@ -83,6 +84,21 @@ function tenantScopeExemptions(): array
         // (`TenantDomain::canonicalHostFor($tenantId)`), and only *verified* rows can reach
         // URL generation. See the TenantDomain docblock and its migration.
         TenantDomain::class => 'resolution tier: read by host before a tenant is bound; unique(host) is global by design',
+
+        // Resolution tier (task 6.1, Req 8.4 / A8; Req 9.2 / A9) — the same argument as
+        // `tenant_domains`, for inbound provider webhooks instead of inbound browser
+        // requests. A Meta or BSP callback arrives with no panel session, no subdomain and
+        // no API key: the `route_key` in its URL is the only tenant-bearing thing about it,
+        // so this table is what *establishes* the tenant context and cannot be filtered by
+        // the answer it provides. `unique(route_key)` is therefore **global** — two tenants
+        // holding one key would be an ambiguity resolvable only by guessing which one a
+        // callback meant. Isolation is carried by the key: it is unguessable (task 5.6 mints
+        // it; `UrlBuilder::webhook()` pins its shape), it names exactly one session rather
+        // than a tenant's estate, and the payload is still signature-verified by that
+        // session's driver before anything is believed. Every outbound read names its tenant
+        // explicitly (`ChannelWebhookRoute::scopeForTenant()`). See the model docblock and
+        // its migration.
+        ChannelWebhookRoute::class => 'resolution tier: resolved by route_key before a tenant is bound; unique(route_key) is global by design',
     ];
 }
 

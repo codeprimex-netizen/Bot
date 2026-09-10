@@ -733,15 +733,15 @@ it('bypasses the scope only inside the audited platform frame, and never past it
     $subjects = TenantIsolationProbe::subjects();
     $tenants = $probe->tenants($probe->int(2, 3));
 
-    /** @var array<string, array<string, int>> $expected  model => tenant id => rows seeded */
-    $expected = [];
+    /** @var array<string, array<string, int>> $seeded  model => tenant id => rows this test asked for */
+    $seeded = [];
 
     foreach ($subjects as $subject) {
         $counts = $probe->rowCounts(count($tenants), $subject->maxRowsPerTenant);
 
         foreach ($tenants as $index => $tenant) {
             $probe->seed($subject, $tenant, $counts[$index]);
-            $expected[$subject->model][$tenant->id] = $counts[$index];
+            $seeded[$subject->model][$tenant->id] = $counts[$index];
         }
     }
 
@@ -753,8 +753,24 @@ it('bypasses the scope only inside the audited platform frame, and never past it
 
     foreach ($subjects as $subject) {
         $class = $subject->model;
-        $own = $expected[$subject->model][$acting->id];
         $where = sprintf('seed %d: %s, acting tenant [%s]', $probe->seed, $subject->label(), $acting->id);
+
+        /*
+        | What the acting tenant owns, read through the sanctioned `forTenant()` hatch
+        | rather than taken from the seed plan — the same preference the frame comparison
+        | below already states, and here it is load-bearing: a row of one table can require
+        | a parent row in another *subject's* table (a `channel_send_log` row needs a
+        | session; a `cloud_api_templates` row needs the credential set it is approved
+        | against), so seeding one subject legitimately adds rows to another's table. The
+        | seed plan is kept as a floor, so a writer that silently wrote nothing still fails
+        | rather than making this iteration vacuous.
+        */
+        $own = count($subject->rowsOf($acting));
+
+        expect($own)->toBeGreaterThanOrEqual(
+            $seeded[$subject->model][$acting->id],
+            $where.': the fixture did not seed the rows this iteration is about.',
+        );
 
         // Scoped before the frame...
         expect($class::query()->count())->toBe($own, $where);

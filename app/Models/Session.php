@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Enums\ChannelCapability;
+use App\Enums\ChannelMode;
 use App\Enums\SessionStatus;
 use App\Models\Concerns\BelongsToTenant;
 use Database\Factories\SessionFactory;
@@ -47,7 +49,17 @@ use Illuminate\Support\Carbon;
  * | which disconnect reasons reconnect, and the backoff | `ReconnectPolicy` (task 9.2) |
  * | enforcing a status transition (this model only *states* legality) | `SessionManager::markState()` (task 9.1) |
  * | warm-up ramp, delay window, quiet hours, risk score | `AntiBanEngine` (task 9.6) |
- * | which backend this session talks through (`channel_mode`) | task 6.1 |
+ * | resolving `channel_mode` to a driver, and switching it | `ChannelRouter` (6.3), mode switch (8.6) |
+ *
+ * ## `channel_mode`: exactly one backend per session, `BAILEYS` unless chosen otherwise
+ *
+ * Req 2.6 / A8.1 — every session declares exactly one messaging backend. The column is
+ * `NOT NULL` with a `BAILEYS` default and the same default is declared in `$attributes`
+ * below, so a session created by code that has never heard of Channel Mode is a Baileys
+ * session and behaves exactly as it did before the column existed. Reading it here is free;
+ * turning it into a driver is `ChannelRouter::driverFor()` (task 6.3), and `supports()`
+ * questions go through `ChannelMode`/`ChannelCapability` so the answer is the same in the
+ * panel, the send gate, and the router.
  *
  * The anti-ban columns are readable here (`daily_quota`, `sent_today`, `delay_min_ms`, …)
  * because they are part of the reused table, but nothing in this class interprets them. A
@@ -61,6 +73,7 @@ use Illuminate\Support\Carbon;
  * @property string|null $push_name
  * @property string|null $device_id
  * @property SessionStatus $status
+ * @property ChannelMode $channel_mode
  * @property string|null $auth_ref
  * @property Carbon|null $warmup_start_at
  * @property int $daily_quota
@@ -105,6 +118,11 @@ class Session extends Model
      */
     protected $attributes = [
         'status' => SessionStatus::Initializing->value,
+        // The zero-official-API default (Req 2.6 / A8.1). `ChannelMode::default()` is the
+        // single source; declared here as well as in the migration so a freshly
+        // instantiated model already reports a backend rather than `null`, which no router
+        // could dispatch on.
+        'channel_mode' => ChannelMode::Baileys->value,
     ];
 
     /**
@@ -117,6 +135,7 @@ class Session extends Model
         'push_name',
         'device_id',
         'status',
+        'channel_mode',
         'auth_ref',
         'warmup_start_at',
         'daily_quota',
@@ -139,6 +158,10 @@ class Session extends Model
             // surfaces as a cast error at the boundary rather than as a string no panel can
             // translate and no transition check can evaluate.
             'status' => SessionStatus::class,
+            // Same argument as `status`: a mode written by a newer release surfaces as a
+            // cast error at the boundary rather than as a string the router cannot
+            // dispatch on and the panel cannot translate.
+            'channel_mode' => ChannelMode::class,
             'warmup_start_at' => 'datetime',
             'last_seen_at' => 'datetime',
             'connected_at' => 'datetime',
@@ -209,6 +232,31 @@ class Session extends Model
         return $query->where('status', $status);
     }
 
+    /**
+     * Sessions on one messaging backend — served by `idx(tenant_id, channel_mode)`.
+     *
+     * @param  Builder<Session>  $query
+     * @return Builder<Session>
+     */
+    public function scopeOnMode(Builder $query, ChannelMode $mode): Builder
+    {
+        return $query->where('channel_mode', $mode);
+    }
+
+    /**
+     * Sessions the anti-ban gate applies to: the web-protocol modes (Property 24).
+     *
+     * The sweep that ramps warm-up and paces sends (task 9.6) has no business paging
+     * through official-mode sessions, whose pacing is the provider's.
+     *
+     * @param  Builder<Session>  $query
+     * @return Builder<Session>
+     */
+    public function scopeOnWebProtocol(Builder $query): Builder
+    {
+        return $query->whereIn('channel_mode', ChannelMode::webProtocol());
+    }
+
     /*
     |--------------------------------------------------------------------------
     | What the row says
@@ -231,6 +279,31 @@ class Session extends Model
     public function isTerminal(): bool
     {
         return $this->status->isTerminal();
+    }
+
+    /**
+     * Whether this session's backend can be asked to do `$capability` at all.
+     *
+     * A predicate, never a gate: it states the capability matrix's answer for this row's
+     * mode. Raising `ModeCapabilityException` before dispatch is `ChannelRouter::assertSupported()`
+     * (task 6.3), for the same reason `canTransitionTo()` states legality while
+     * `SessionManager` enforces it — one statement, every caller held to it.
+     */
+    public function supports(ChannelCapability $capability): bool
+    {
+        return $this->channel_mode->supports($capability);
+    }
+
+    /**
+     * Whether the anti-ban warm-up / rate / quiet-hours gate applies to this session
+     * (Req 8.8 / A8; Correctness Property 24).
+     *
+     * True for the web-protocol modes and for no others, with no configuration able to
+     * change it.
+     */
+    public function requiresAntiBan(): bool
+    {
+        return $this->channel_mode->isWebProtocol();
     }
 
     /**

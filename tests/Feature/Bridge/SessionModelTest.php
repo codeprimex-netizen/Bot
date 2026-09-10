@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use App\Enums\ChannelCapability;
+use App\Enums\ChannelMode;
 use App\Enums\SessionStatus;
 use App\Exceptions\Tenancy\CrossTenantAccessException;
 use App\Models\Session;
@@ -151,8 +153,52 @@ it('soft-deletes so the rows that reference a session keep resolving', function 
     });
 });
 
-it('does not carry a channel_mode column yet — task 6.1 owns it', function (): void {
-    // Pinned deliberately: the column arrives with the ChannelMode enum and the credential
-    // tables that give it meaning, so adding it here would ship a mode nothing can select.
-    expect(Schema::hasColumn('sessions_wa', 'channel_mode'))->toBeFalse();
+it('declares exactly one messaging backend, defaulting to BAILEYS', function (): void {
+    // Task 6.1 added the column, with the ChannelMode enum and the credential tables that
+    // give it meaning. The default is the compatibility promise: a session created by code
+    // that never heard of Channel Mode is a Baileys session, and behaves exactly as it did
+    // before the column existed (Req 2.6 / A8.1).
+    $tenant = Tenant::factory()->create();
+
+    $session = app(TenantContext::class)->runFor(
+        $tenant,
+        fn (): Session => Session::create(['name' => 'Support']),
+    );
+
+    expect(Schema::hasColumn('sessions_wa', 'channel_mode'))->toBeTrue()
+        // Reported before the row is re-read, not only after: a lifecycle service comparing
+        // an unsaved model's mode must not see "no backend".
+        ->and($session->channel_mode)->toBe(ChannelMode::Baileys)
+        ->and($session->fresh()?->channel_mode)->toBe(ChannelMode::Baileys)
+        // ...and the pre-Channel-Mode behaviour a Baileys session must keep.
+        ->and($session->requiresAntiBan())->toBeTrue()
+        ->and($session->supports(ChannelCapability::Groups))->toBeTrue();
+});
+
+it('indexes sessions by tenant and mode so a per-mode sweep does not scan', function (): void {
+    $leads = collect(Schema::getIndexes('sessions_wa'))->contains(
+        fn (array $index): bool => array_slice($index['columns'], 0, 2) === ['tenant_id', 'channel_mode'],
+    );
+
+    expect($leads)->toBeTrue();
+});
+
+it('separates web-protocol sessions from official-mode ones', function (): void {
+    $tenant = Tenant::factory()->create();
+
+    app(TenantContext::class)->runFor($tenant, function () use ($tenant): void {
+        Session::factory()->create(['tenant_id' => $tenant->id, 'channel_mode' => ChannelMode::Baileys]);
+        Session::factory()->create(['tenant_id' => $tenant->id, 'channel_mode' => ChannelMode::OnPremise]);
+        $official = Session::factory()->create([
+            'tenant_id' => $tenant->id,
+            'channel_mode' => ChannelMode::CloudApi,
+        ]);
+
+        // The anti-ban sweep (task 9.6) has no business paging through official-mode
+        // sessions, whose pacing is the provider's (Property 24).
+        expect(Session::query()->onWebProtocol()->count())->toBe(2)
+            ->and(Session::query()->onMode(ChannelMode::CloudApi)->count())->toBe(1)
+            ->and($official->requiresAntiBan())->toBeFalse()
+            ->and($official->supports(ChannelCapability::Groups))->toBeFalse();
+    });
 });

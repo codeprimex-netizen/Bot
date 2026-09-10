@@ -6,6 +6,7 @@ namespace Tests\Fixtures\Tenancy;
 
 use App\Enums\AbuseSignal;
 use App\Enums\AbuseVector;
+use App\Enums\ChannelMode;
 use App\Enums\GuardAction;
 use App\Enums\KeyPurpose;
 use App\Enums\QuotaHoldStatus;
@@ -14,6 +15,9 @@ use App\Enums\QuotaReason;
 use App\Enums\TenantTier;
 use App\Models\AbuseEvent;
 use App\Models\AuditLog;
+use App\Models\ChannelCredential;
+use App\Models\ChannelSendLog;
+use App\Models\CloudApiTemplate;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\EncryptionKey;
 use App\Models\QuotaHold;
@@ -548,6 +552,98 @@ final class TenantIsolationProbe
                     $tenantId === null
                         ? AbuseEvent::withoutTenantScope()
                         : AbuseEvent::forTenant($tenantId)
+                )->get()->all(),
+            ),
+            new TenantOwnedSubject(
+                model: ChannelCredential::class,
+                maxRowsPerTenant: 6,
+                appendOnly: false,
+                // Nothing numeric on the row: a credential set is config, not a counter.
+                sumColumn: null,
+                // `label` is part of uniq(tenant_id, mode, provider_slot, label), which is
+                // harmless here because every seam write is *refused* — and the columns that
+                // are not in a unique index are all enum- or cipher-cast, where a foreign
+                // write would fail on the cast instead of on the ownership check the seam is
+                // measuring.
+                mutableColumn: 'label',
+                // `withoutSecrets()`, and not because secrets are awkward: writing one would
+                // make `FieldCipher` lazily provision the tenant's ACTIVE `FIELD` key, and the
+                // `encryption_keys` subject below seeds that same lineage itself — one ACTIVE
+                // version per lineage, so the two writers would race for it. A row with no
+                // secrets is a real production state anyway (Req 8.13's "credentials missing",
+                // which keeps a mode unselectable), and the encryption path has its own
+                // coverage in `ChannelCredentialSecrecyTest`.
+                writer: static fn (Tenant $tenant, int $index, self $probe): Model => ChannelCredential::factory()
+                    ->forMode($probe->pick(ChannelMode::cases()))
+                    ->withoutSecrets()
+                    ->create([
+                        'tenant_id' => $tenant->id,
+                        'label' => 'probe '.$probe->seed.'/'.$probe->rows.'/'.$index,
+                    ]),
+                reader: static fn (?string $tenantId): array => (
+                    $tenantId === null
+                        ? ChannelCredential::withoutTenantScope()
+                        : ChannelCredential::forTenant($tenantId)
+                )->get()->all(),
+            ),
+            new TenantOwnedSubject(
+                model: CloudApiTemplate::class,
+                maxRowsPerTenant: 6,
+                appendOnly: false,
+                sumColumn: null,
+                // The template's own copy: not cast, not unique, and a column a write can
+                // legitimately aim at.
+                mutableColumn: 'body',
+                // uniq(tenant_id, credential_id, name, language). The credential row is
+                // created for the same tenant, because a template is approved against one
+                // provider account and the foreign key says so.
+                writer: static function (Tenant $tenant, int $index, self $probe): Model {
+                    // No secrets, for the reason the credential subject above records.
+                    $credential = ChannelCredential::factory()
+                        ->forMode(ChannelMode::CloudApi)
+                        ->withoutSecrets()
+                        ->create([
+                            'tenant_id' => $tenant->id,
+                            'label' => 'probe tpl '.$probe->seed.'/'.$probe->rows.'/'.$index,
+                        ]);
+
+                    return CloudApiTemplate::factory()->create([
+                        'tenant_id' => $tenant->id,
+                        'credential_id' => $credential->id,
+                        'name' => 'probe_'.$probe->seed.'_'.$probe->rows.'_'.$index,
+                    ]);
+                },
+                reader: static fn (?string $tenantId): array => (
+                    $tenantId === null
+                        ? CloudApiTemplate::withoutTenantScope()
+                        : CloudApiTemplate::forTenant($tenantId)
+                )->get()->all(),
+            ),
+            new TenantOwnedSubject(
+                model: ChannelSendLog::class,
+                maxRowsPerTenant: 6,
+                appendOnly: true,
+                sumColumn: null,
+                // The block reason: a short code, not cast, and absent on a successful send.
+                mutableColumn: 'block_reason',
+                writer: static function (Tenant $tenant, int $index, self $probe): Model {
+                    $session = Session::factory()->create([
+                        'tenant_id' => $tenant->id,
+                        'name' => 'probe log session '.$probe->seed.'/'.$probe->rows.'/'.$index,
+                    ]);
+
+                    return ChannelSendLog::factory()->create([
+                        'tenant_id' => $tenant->id,
+                        'session_id' => $session->id,
+                        'mode' => $session->channel_mode,
+                        // uniq(tenant_id, idempotency_key).
+                        'idempotency_key' => 'probe-'.$probe->seed.'-'.$probe->rows.'-'.$index,
+                    ]);
+                },
+                reader: static fn (?string $tenantId): array => (
+                    $tenantId === null
+                        ? ChannelSendLog::withoutTenantScope()
+                        : ChannelSendLog::forTenant($tenantId)
                 )->get()->all(),
             ),
             new TenantOwnedSubject(
