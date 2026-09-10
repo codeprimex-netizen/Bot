@@ -55,6 +55,7 @@ class PlanSeeder extends Seeder
                     'faq' => true,
                     'ai' => false,
                     'campaigns' => false,
+                    'channel_failover' => false,
                     'api' => false,
                     'webhooks' => false,
                     'custom_domain' => false,
@@ -83,6 +84,7 @@ class PlanSeeder extends Seeder
                     'faq' => true,
                     'ai' => true,
                     'campaigns' => true,
+                    'channel_failover' => false,
                     'api' => true,
                     'webhooks' => true,
                     'custom_domain' => true,
@@ -111,6 +113,11 @@ class PlanSeeder extends Seeder
                     'faq' => true,
                     'ai' => true,
                     'campaigns' => true,
+                    // The premium half of Channel Mode: an ordered fallback chain per
+                    // session (Req 8.10, 8.11 / A8). Only the top tier buys it — a
+                    // fallback to a web-protocol mode re-enables anti-ban pacing on a
+                    // second number, which is a cost the platform carries.
+                    'channel_failover' => true,
                     'api' => true,
                     'webhooks' => true,
                     'custom_domain' => true,

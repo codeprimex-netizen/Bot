@@ -95,6 +95,25 @@ enum PlanFeature: string
     /** Own-group member/number extraction (Req 21.4 / C4). */
     case Extraction = 'extraction';
 
+    /**
+     * Multi-mode channel failover: a session may declare an ordered fallback chain of
+     * `ChannelMode`s that a failed dispatch advances through (Req 8.10, 8.11 / A8;
+     * design § Channel Mode 2.6, *"opt-in, plan-gated"*).
+     *
+     * Gated for two reasons that are worth separating. It is a **premium** capability —
+     * a tenant with a Cloud API primary and a Baileys fallback keeps sending through an
+     * outage that would otherwise stop it. And it is a capability with a **cost the
+     * platform carries**: a fallback to a web-protocol mode re-enables anti-ban pacing on
+     * a second number, doubles the breaker surface of one dispatch, and produces the
+     * failover audit rows task 8.5 writes.
+     *
+     * `ChannelRouter::failoverChain()` (task 6.3) reads this gate on **every** call rather
+     * than at the point a chain is configured, so revoking the entitlement — a downgrade,
+     * a plan edit — collapses every session back to its single primary driver immediately
+     * instead of leaving a configured chain quietly live for the rest of the billing period.
+     */
+    case ChannelFailover = 'channel_failover';
+
     /*
     |--------------------------------------------------------------------------
     | Platform surface (C1, C6, D)
@@ -137,6 +156,7 @@ enum PlanFeature: string
             self::Channels => 'Channel management',
             self::Groups => 'Group management',
             self::Extraction => 'Group number extraction',
+            self::ChannelFailover => 'Multi-mode channel failover',
             self::Api => 'REST API access',
             self::Webhooks => 'Webhooks',
             self::CustomDomain => 'Custom domain',

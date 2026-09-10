@@ -74,6 +74,7 @@ use Illuminate\Support\Carbon;
  * @property string|null $device_id
  * @property SessionStatus $status
  * @property ChannelMode $channel_mode
+ * @property array<array-key, mixed>|null $failover_modes
  * @property string|null $auth_ref
  * @property Carbon|null $warmup_start_at
  * @property int $daily_quota
@@ -136,6 +137,7 @@ class Session extends Model
         'device_id',
         'status',
         'channel_mode',
+        'failover_modes',
         'auth_ref',
         'warmup_start_at',
         'daily_quota',
@@ -162,6 +164,12 @@ class Session extends Model
             // cast error at the boundary rather than as a string the router cannot
             // dispatch on and the panel cannot translate.
             'channel_mode' => ChannelMode::class,
+            // Deliberately a plain array and *not* a list-of-enums cast: this is stored
+            // configuration that a later release must be able to read past. A value outside
+            // `ChannelMode` here is skipped by `failoverModes()`, whereas a cast would make
+            // the whole row unreadable — see that method, and the migration's table of
+            // stored oddities.
+            'failover_modes' => 'array',
             'warmup_start_at' => 'datetime',
             'last_seen_at' => 'datetime',
             'connected_at' => 'datetime',
@@ -292,6 +300,46 @@ class Session extends Model
     public function supports(ChannelCapability $capability): bool
     {
         return $this->channel_mode->supports($capability);
+    }
+
+    /**
+     * The fallback modes this session has been configured with, in attempt order, with
+     * anything this release cannot interpret dropped (Req 8.10, 8.11 / A8).
+     *
+     * A **reader of stored configuration**, not a routing decision: it says what the column
+     * holds, in the column's own order, and answers nothing about which of those modes can
+     * actually be used. `ChannelRouter::failoverChain()` (task 6.3) is what turns this into
+     * drivers — putting the session's own mode at the head, deduplicating, dropping modes
+     * with no usable credentials, and collapsing the whole thing to the primary when the
+     * plan does not include failover. None of that belongs on a model that cannot see the
+     * tenant's plan or credentials.
+     *
+     * An unknown value is skipped rather than fatal (`ChannelMode::tryFromKey()` returns
+     * `null` for it), which is the same posture the column's `array` cast takes: a chain
+     * written by a newer release, or a mode retired by an older one, degrades to a shorter
+     * chain instead of making a session unroutable. The primary `channel_mode` is cast
+     * strictly precisely because the opposite is true there — a mode nobody can dispatch on
+     * must be loud.
+     *
+     * @return list<ChannelMode>
+     */
+    public function failoverModes(): array
+    {
+        $modes = [];
+
+        foreach ($this->failover_modes ?? [] as $value) {
+            if (! is_string($value)) {
+                continue;
+            }
+
+            $mode = ChannelMode::tryFromKey($value);
+
+            if ($mode !== null) {
+                $modes[] = $mode;
+            }
+        }
+
+        return $modes;
     }
 
     /**

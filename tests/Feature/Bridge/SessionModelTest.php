@@ -202,3 +202,31 @@ it('separates web-protocol sessions from official-mode ones', function (): void 
             ->and($official->supports(ChannelCapability::Groups))->toBeFalse();
     });
 });
+
+it('stores an optional ordered failover chain, and reads past anything it cannot interpret', function (): void {
+    // Task 6.3's column (Req 8.10, 8.11 / A8). NULL is the default and means *no failover* —
+    // design § Channel Mode 2.6 — so a session that existed before the column keeps exactly
+    // one driver.
+    $tenant = Tenant::factory()->create();
+
+    app(TenantContext::class)->runFor($tenant, function () use ($tenant): void {
+        $plain = Session::factory()->create(['tenant_id' => $tenant->id]);
+
+        expect(Schema::hasColumn('sessions_wa', 'failover_modes'))->toBeTrue()
+            ->and($plain->failover_modes)->toBeNull()
+            ->and($plain->failoverModes())->toBe([]);
+
+        $configured = Session::factory()->create([
+            'tenant_id' => $tenant->id,
+            'channel_mode' => ChannelMode::CloudApi,
+            // A chain written by a newer release, plus a value no release ever wrote.
+            'failover_modes' => ['BAILEYS', 'TELEGRAM', 'ON_PREMISE', 7],
+        ]);
+
+        // Order preserved, unknown values dropped rather than fatal: stored configuration a
+        // release cannot fully interpret must degrade to a shorter chain, never to a session
+        // nobody can route. (`channel_mode` is cast strictly for the opposite reason.)
+        expect($configured->failoverModes())->toBe([ChannelMode::Baileys, ChannelMode::OnPremise])
+            ->and($configured->fresh()?->failoverModes())->toBe([ChannelMode::Baileys, ChannelMode::OnPremise]);
+    });
+});

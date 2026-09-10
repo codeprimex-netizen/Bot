@@ -140,3 +140,20 @@ it('lets a refinement move a supported cell either way but never lift a refusal'
         ->and($unsupported->refinedBy($native))->toBe($unsupported)
         ->and($unsupported->refinedBy($conditional))->toBe($unsupported);
 });
+
+it('names every capability once, for the refusal and the panel to quote', function (): void {
+    $labels = array_map(
+        static fn (ChannelCapability $capability): string => $capability->label(),
+        ChannelCapability::cases(),
+    );
+
+    // One phrase per capability, so `ModeCapabilityException` and a disabled-with-reason
+    // tooltip cannot describe the same cell differently — and none of them is empty, which
+    // would leave a refusal saying "  is not available on this session".
+    expect($labels)->toBe(array_values(array_unique($labels)))
+        ->and(ChannelCapability::Groups->label())->toBe('Group management');
+
+    foreach ($labels as $label) {
+        expect(trim($label))->not->toBe('');
+    }
+});

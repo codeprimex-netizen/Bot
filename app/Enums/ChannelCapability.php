@@ -48,7 +48,7 @@ namespace App\Enums;
  * | Concern | Owner |
  * |---|---|
  * | `supports()` on a live driver, and the per-provider sub-matrix | tasks 6.2, 7.4 |
- * | routing, and raising `ModeCapabilityException` | task 6.3 (`ChannelRouter`) |
+ * | routing, and raising `ModeCapabilityException` (which names the cell with `label()`) | task 6.3 (`ChannelRouter`) |
  * | persisting the handshake's authoritative capability set (Req 8.2) | task 8.2 |
  * | the 24-hour-window / approved-template rule a `Conditional` cell implies | task 8.4 |
  * | rendering an unsupported feature disabled-with-reason | the panel tasks (§4.1 row 10) |
@@ -98,6 +98,39 @@ enum ChannelCapability: string
 
     /** Delivery and read receipts for outbound messages. */
     case DeliveryReceipts = 'DELIVERY_RECEIPTS';
+
+    /**
+     * A short human name for this capability — design § Channel Mode 2.3's own row heading.
+     *
+     * The single source of the phrase every *human-facing* refusal uses, for the same reason
+     * `ChannelMode::label()` and `PlanFeature::label()` exist: `ModeCapabilityException`
+     * (task 6.3) names the capability in its message, the panel names it in a
+     * disabled-with-reason tooltip (§ 4.1 row 10), and an operator reads both. A message that
+     * spelled the row out inline would drift from the matrix the moment a row is renamed,
+     * and the drift would be invisible — nothing fails when an error message is stale.
+     *
+     * These are platform-authored strings, never tenant input, so a refusal may safely
+     * interpolate one (the argument `FeatureNotInPlanException` makes about
+     * `PlanFeature::label()`).
+     */
+    public function label(): string
+    {
+        return match ($this) {
+            self::SendSingle => 'Single send (text)',
+            self::SendBulk => 'Bulk send',
+            self::Media => 'Media (image, document, audio, video, sticker)',
+            self::FreeFormAnytime => 'Free-form text anytime',
+            self::Template => 'Approved template messages',
+            self::Interactive => 'Buttons, lists, and interactive messages',
+            self::Groups => 'Group management',
+            self::Welcome => 'Auto-welcome on join',
+            self::Extraction => 'Group member extraction',
+            self::Tagging => 'Group tagging',
+            self::Channels => 'Channels / newsletters management',
+            self::InboundWebhook => 'Inbound webhooks',
+            self::DeliveryReceipts => 'Delivery and read receipts',
+        };
+    }
 
     /**
      * How well `$mode` supports this capability — design § Channel Mode 2.3, cell by cell.
