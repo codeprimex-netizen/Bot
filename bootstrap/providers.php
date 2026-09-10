@@ -20,4 +20,5 @@ return [
     App\Providers\OutboxServiceProvider::class,
     App\Providers\SagaServiceProvider::class,
     App\Providers\BridgeServiceProvider::class,
+    App\Providers\ChannelServiceProvider::class,
 ];
