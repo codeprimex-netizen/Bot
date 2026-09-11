@@ -233,6 +233,9 @@ final class DatabaseChannelCredentialStore implements ChannelCredentialStore
                 ->orderByRaw('verified_at is null')
                 ->orderByDesc('verified_at')
                 ->orderByDesc('created_at')
+                // The tie-break, and it is load-bearing rather than tidiness: see
+                // `ChannelCredential::activeFor()`.
+                ->orderByDesc('id')
                 ->first();
 
             // The has-secrets half of `isUsable()`, which SQL cannot answer. Applied to the
@@ -283,10 +286,12 @@ final class DatabaseChannelCredentialStore implements ChannelCredentialStore
                 // The same priority `for()` applies, without the status filter — so the
                 // first usable element of this list is what `for()` returns, and
                 // `ChannelCredentialStoreTest` asserts exactly that rather than trusting the
-                // two orderings to stay in step.
+                // two orderings to stay in step. The `id` tie-break is part of that: a list
+                // the panel ordered differently from the send path would be lying.
                 ->orderByRaw('verified_at is null')
                 ->orderByDesc('verified_at')
                 ->orderByDesc('created_at')
+                ->orderByDesc('id')
                 ->get()
                 ->all();
 
@@ -329,11 +334,11 @@ final class DatabaseChannelCredentialStore implements ChannelCredentialStore
 
     public function forget(Tenant $tenant, ChannelMode $mode, ?BspProvider $provider = null): void
     {
-        $prefix = $this->memoPrefix($tenant, $mode, $this->readProvider($mode, $provider));
-
-        foreach (array_keys($this->resolved) as $key) {
-            if (str_starts_with($key, $prefix)) {
-                unset($this->resolved[$key]);
+        foreach ($this->invalidatedPrefixes($tenant, $mode, $this->readProvider($mode, $provider)) as $prefix) {
+            foreach (array_keys($this->resolved) as $key) {
+                if (str_starts_with($key, $prefix)) {
+                    unset($this->resolved[$key]);
+                }
             }
         }
     }
@@ -721,6 +726,50 @@ final class DatabaseChannelCredentialStore implements ChannelCredentialStore
     private function memoKey(Tenant $tenant, ChannelMode $mode, ?BspProvider $provider, ?string $label): string
     {
         return $this->memoPrefix($tenant, $mode, $provider).($label ?? '');
+    }
+
+    /**
+     * Every memo scope a change to `(tenant, mode, provider)` invalidates — which for a
+     * provider-using mode is **two**, and the second one is not optional.
+     *
+     * `rowFor($tenant, BSP_GATEWAY)` with no partner named is answered across the tenant's
+     * partners, and it is memoised under the provider-less scope. So a write to *any one*
+     * partner changes what that lookup answers, and a `{tenant}|{mode}|{partner}|` prefix does
+     * not reach it. That lookup is not hypothetical: it is exactly the one
+     * `DefaultChannelRouter::hasCredentials()` makes, so leaving the provider-less memo
+     * standing meant a partner's **first** credential set was written and then ignored — the
+     * remembered "this tenant has no BSP credentials" outliving the write that gave it some,
+     * and routing refusing a BSP driver for the rest of that request or job. One `forget()`
+     * call has to be enough; a caller cannot be expected to know it needs two.
+     *
+     * The reverse direction is covered as well: a provider-less `forget()` on a mode that
+     * *does* use one clears every partner's scope, because the caller named no partner and
+     * therefore meant the mode. Both directions err towards forgetting too much, which is free
+     * — the memo is an intra-request deduplication and never a correctness dependency (see the
+     * class docblock), so the only cost of an extra clear is one indexed lookup.
+     *
+     * @return list<string> distinct, so a mode with no provider is not walked twice
+     */
+    private function invalidatedPrefixes(Tenant $tenant, ChannelMode $mode, ?BspProvider $provider): array
+    {
+        $prefixes = [$this->memoPrefix($tenant, $mode, $provider)];
+
+        if (! $mode->usesProvider()) {
+            return $prefixes;
+        }
+
+        if ($provider !== null) {
+            // The mode-wide lookup, whose answer this partner's write may have changed.
+            $prefixes[] = $this->memoPrefix($tenant, $mode, null);
+
+            return $prefixes;
+        }
+
+        foreach (BspProvider::cases() as $case) {
+            $prefixes[] = $this->memoPrefix($tenant, $mode, $case);
+        }
+
+        return $prefixes;
     }
 
     /**

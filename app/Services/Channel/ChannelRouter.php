@@ -156,4 +156,51 @@ interface ChannelRouter
      * @see ChannelCapabilitySupport for what each value obliges a caller to do
      */
     public function supportLevel(Session $session, ChannelCapability $capability): ChannelCapabilitySupport;
+
+    /**
+     * Drop whatever this router remembers about `(tenant, mode)`, so the next resolution
+     * re-reads.
+     *
+     * The seam for a caller that has just changed what a resolution would **answer** rather
+     * than what it is allowed to do: task 7.6 stamping `verified_at` on a candidate or marking
+     * a set `INVALID`, and task 8.6 switching a session's mode mid-request. Both change which
+     * credential row `ChannelCredentialStore::rowFor()`'s newest-verified-first ordering
+     * selects, and neither is visible to a router that already answered once — so this is
+     * called in the same breath as `ChannelCredentialStore::forget()`, and one without the
+     * other leaves half a stale resolution standing.
+     *
+     * ## Why it is on the contract and not only on the implementation
+     *
+     * Memoisation reads like an implementation detail, and for one call it is. It stops being
+     * one the moment resolution is **observable**: `driverFor()` is documented to answer at
+     * most once per `(tenant, mode)` per unit of work, which is what makes it safe to call in a
+     * campaign's hot loop, and any implementation honouring that has something to drop. A
+     * contract that promised the memo but not the way out of it forced every collaborator to
+     * type-check for `DefaultChannelRouter` before dropping it — a defensive `instanceof`
+     * that reads as caution while actually meaning *"this call may silently do nothing"*.
+     *
+     * A memo-less implementation satisfies this trivially with an empty body, which is a
+     * cheaper obligation than the one the `instanceof` imposed on every caller.
+     *
+     * Idempotent, cheap, and the **only** mutation this contract exposes. It cannot change
+     * routing: a forgotten `(tenant, mode)` re-resolves to the same mode, through the same
+     * registry, under the same ownership and credential checks — so it is a way to make a
+     * resolution *fresh*, never a way to make it different.
+     *
+     * ## `flush()` is deliberately **not** here
+     *
+     * `DefaultChannelRouter::flush()` exists and stays on the implementation. The case for
+     * promoting it is symmetry: `ChannelCredentialStore` puts both `forget()` and `flush()` on
+     * its interface, the two memos are dropped in pairs, and a future bulk rotation would hit
+     * the same asymmetry this member was added to remove. The case against is what actually
+     * decides it — `forget()` was promoted because it *had* callers being forced into an
+     * `instanceof`, and `flush()` has none anywhere in the codebase; and unlike `forget()`,
+     * whose arguments confine it to one tenant and one mode, `flush()` discards **every**
+     * tenant's resolutions, which is not an operation a mode screen or a validator running
+     * inside one tenant's request should be offered. Leaving it on the concrete class means its
+     * one plausible user — a platform-wide sweep, or a test proving the memo is per-instance —
+     * has to name the implementation, which is the right amount of friction. It should be added
+     * the day a caller exists, with that caller as the evidence.
+     */
+    public function forget(Tenant $tenant, ChannelMode $mode): void;
 }

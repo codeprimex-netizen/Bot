@@ -302,6 +302,27 @@ class ChannelCredential extends Model
      * Newest-verified first, then newest: a rotation (task 7.6) writes a fresh row and the
      * send picks it up without anything having to update a pointer, while an unverified row
      * never displaces a verified one.
+     *
+     * ## The `id` tie-break is what makes "newest" total
+     *
+     * `verified_at` and `created_at` are both **second-resolution** datetimes, so two sets
+     * verified inside the same second compare equal on every column above and the row a send
+     * uses is whatever order the storage engine happened to return. That is not a theoretical
+     * tie: `ChannelCredentialValidator` stamps `verified_at` the moment the driver answers,
+     * which for a healthy provider is comfortably inside the second the set it replaces was
+     * verified in — so the tie is the *normal* case for a rotation, and losing it means the
+     * rotation silently does not take over.
+     *
+     * `id` resolves it because the primary key is a **ULID** (`HasUlids`, and this table's
+     * `id` column is declared `ulid`), which sorts lexicographically by generation time —
+     * Symfony's `Ulid::generate()` increments the random component for a second call inside the
+     * same millisecond rather than re-randomising it, so ids are monotonic even at that
+     * resolution and "the row written later" is a fact the key already carries. Nothing else
+     * available here is: an auto-increment column does not exist, and a higher-resolution
+     * timestamp column would be a migration plus two more places to keep in step.
+     *
+     * `DatabaseChannelCredentialStore` spells the identical ordering (twice — `rowFor()` and
+     * `all()`), and `ChannelCredentialStoreTest` pins the three together.
      */
     public static function activeFor(ChannelMode $mode, ?BspProvider $provider = null): ?self
     {
@@ -311,6 +332,7 @@ class ChannelCredential extends Model
             ->orderByRaw('verified_at is null')
             ->orderByDesc('verified_at')
             ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->first();
     }
 

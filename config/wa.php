@@ -7,7 +7,9 @@ use App\Enums\ErrorClass;
 use App\Enums\QuotaKind;
 use App\Enums\TenantTier;
 use App\Services\Bridge\BridgeErrorClassifier;
+use App\Services\Channel\BspGatewayErrorClassifier;
 use App\Services\Channel\CloudApiErrorClassifier;
+use App\Services\Channel\OnPremiseErrorClassifier;
 use App\Services\Dispatch\Eligibility\QuotaDispatchEligibility;
 use App\Services\Reliability\HttpOutboxTransport;
 use App\Services\Security\ConfigMasterKeyWrapper;
@@ -152,6 +154,124 @@ return [
             // and the queue lease has to outlive the whole attempt.
             'timeout' => (int) env('WA_CLOUD_API_TIMEOUT', 15),
             'connect_timeout' => (int) env('WA_CLOUD_API_CONNECT_TIMEOUT', 5),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | WhatsApp Business API On-Premise client (task 7.3)
+        |----------------------------------------------------------------------
+        | Read by `App\Services\Channel\OnPremiseChannelDriver` and by nothing
+        | else. Every value has a compiled-in fallback in that class, so deleting
+        | a key degrades to a working driver rather than to an unbounded read.
+        |
+        | There is deliberately **no `base_url`** here, and its absence is a
+        | security decision rather than an omission. design § Channel Mode 2.7
+        | makes the container host a **tenant credential**: the container is the
+        | tenant's own, so its address is theirs and is stored in
+        | `channel_credentials.config['base_url']`. A platform default would be a
+        | way to send one tenant's decrypted username and password to a host the
+        | tenant never named — including another tenant's container — the moment
+        | their own value were absent or unreadable. So a tenant with no
+        | `base_url` is refused (`ChannelCredentials::requireConfig()`), never
+        | defaulted. This is the exact inverse of `cloud_api.base_url` above,
+        | which is platform config precisely so a *tenant* cannot choose it.
+        */
+        'on_premise' => [
+            // Seconds for the whole request, and for the connection alone. More
+            // generous than Cloud API's on purpose: the container is a single
+            // self-hosted process, often on modest hardware, and its
+            // `POST /v1/messages` blocks until the WhatsApp gateway has accepted
+            // the message — `graph.facebook.com` does not.
+            'timeout' => (int) env('WA_ON_PREMISE_TIMEOUT', 20),
+            'connect_timeout' => (int) env('WA_ON_PREMISE_CONNECT_TIMEOUT', 5),
+
+            // Whether a tenant's `base_url` may name a loopback, private, or
+            // link-local **IP literal**. Default off, and the default is the
+            // control: on a hosted platform the tenant's container is reachable
+            // over the internet, so a private address there is either a mistake
+            // or an attempt to aim the platform's HTTP client at something inside
+            // its own network — `http://169.254.169.254/` is where a cloud
+            // metadata endpoint lives. A self-hosted deployment whose container
+            // genuinely shares the VPC turns it on, deliberately and in one
+            // place. It widens nothing else: the scheme check and the refusal of
+            // userinfo in the URL are unconditional, in code.
+            'allow_private_hosts' => (bool) env('WA_ON_PREMISE_ALLOW_PRIVATE_HOSTS', false),
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | BSP partners (task 7.4)
+        |----------------------------------------------------------------------
+        | Read by `App\Services\Channel\BspGatewayChannelDriver` (the budgets) and
+        | by `App\Services\Channel\Bsp\Adapters\BaseBspAdapter::baseUrl()` (the
+        | per-partner hosts). Every value has a compiled-in fallback — the
+        | driver's own constants, and each adapter's `defaultBaseUrl()` — so
+        | deleting this whole block degrades to a working driver.
+        |
+        | Which class speaks a partner's protocol is **not** here: the eight
+        | adapters are a code list (`Bsp\BspAdapterRegistry::defaults()`), for the
+        | reason `ChannelServiceProvider::drivers()` gives about the mode
+        | registry. A mis-keyed entry in an environment-driven map would be a live
+        | cross-provider bug — one tenant's API key posted to another partner's
+        | endpoint.
+        */
+        'bsp' => [
+            // Shared by all eight. A partner gateway is an internet-facing API in
+            // front of Meta's, so the budget is Cloud API's rather than
+            // On-Premise's.
+            'timeout' => (int) env('WA_BSP_TIMEOUT', 15),
+            'connect_timeout' => (int) env('WA_BSP_CONNECT_TIMEOUT', 5),
+
+            /*
+            | Per-partner API hosts, keyed by `BspProvider::webhookSlug()`.
+            |
+            | Three-step precedence in `BaseBspAdapter::baseUrl()`: the tenant's
+            | own `base_url` credential, then the key below, then the adapter's
+            | compiled-in default. The middle step exists for a sandbox or a
+            | regional edge — Infobip and Kaleyra give each account its own
+            | subdomain — and unset is the normal state, which is why these are
+            | `env()` with no default: a null is skipped and the adapter's default
+            | answers. A value that is not an absolute `http(s)` URL is skipped
+            | too, because this is where a tenant's API key is about to be sent.
+            |
+            | Unlike `on_premise` above, a platform default is safe here: these
+            | hosts are the *partners'* own public endpoints, not a tenant's
+            | private container.
+            */
+            'twilio' => ['base_url' => env('WA_BSP_TWILIO_BASE_URL')],
+            '360dialog' => ['base_url' => env('WA_BSP_360DIALOG_BASE_URL')],
+            'gupshup' => ['base_url' => env('WA_BSP_GUPSHUP_BASE_URL')],
+            'vonage' => ['base_url' => env('WA_BSP_VONAGE_BASE_URL')],
+            'messagebird' => ['base_url' => env('WA_BSP_MESSAGEBIRD_BASE_URL')],
+            'infobip' => ['base_url' => env('WA_BSP_INFOBIP_BASE_URL')],
+            'wati' => ['base_url' => env('WA_BSP_WATI_BASE_URL')],
+            'kaleyra' => ['base_url' => env('WA_BSP_KALEYRA_BASE_URL')],
+        ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Credential re-validation (`wa:channel:revalidate`, task 7.6)
+        |----------------------------------------------------------------------
+        | `App\Console\Commands\RevalidateChannelCredentials` is the only reader,
+        | and it has its own fallback of 25, so a deleted key degrades to a
+        | working sweep. A non-positive value is ignored for the same reason
+        | `wa.tenancy.lifecycle.retention_days` must be > 0: a zero batch would
+        | make a run a no-op that reports success.
+        |
+        | There is deliberately **no `interval_hours`** to match
+        | `tenancy.domains.recheck` above, because this command is **not** on the
+        | scheduler. `RecheckTenantDomains` can run unattended because an
+        | inconclusive domain probe is distinguishable from a failed one
+        | (`DomainVerificationFailure::isConclusive()`); `ChannelHealth` is
+        | two-valued and reports a Meta **rate-limit** refusal as unhealthy, so an
+        | unattended sweep would mark perfectly good credentials INVALID for every
+        | tenant Meta happened to be throttling — and a tenant cannot fix that by
+        | re-entering a token that was never wrong. Re-validation is therefore an
+        | explicitly invoked act; see that command for the contract change that
+        | would have to land first.
+        */
+        'revalidate' => [
+            'batch' => (int) env('WA_CHANNEL_REVALIDATE_BATCH', 25),
         ],
 
         /*
@@ -1100,8 +1220,29 @@ return [
                 // succeeded a minute later. An invalid token (`190`) is `AUTH` and is
                 // never retried. It checks the failure's `mode` first and returns null
                 // for the other official modes, whose error numbers collide with
-                // Meta's — tasks 7.3 and 7.4 add one classifier each, here.
+                // Meta's — which is what lets the two classifiers below claim their
+                // own.
                 CloudApiErrorClassifier::class,
+
+                // The legacy On-Premise client (task 7.3). Its numbering overlaps
+                // Meta's in the worst direction: `1015` and `471` are rate limits to
+                // defer, `1005` is a denied bearer token to fail fast, and `470` is
+                // the 24-hour window — none of which mean anything in Meta's table.
+                // Read Meta's table against an On-Premise refusal and a terminal
+                // validation error is retried eight times; read this one against
+                // Meta's and a rate limit is dropped as malformed. The mode check in
+                // each class is what keeps the two apart.
+                OnPremiseErrorClassifier::class,
+
+                // BSP partners (task 7.4) — **one** entry, not eight. It checks the
+                // mode, then the partner, then dispatches to that adapter's own code
+                // table (`Bsp\BspAdapter::classify()`), because within this mode the
+                // collisions are eight-way: MessageBird's `2` is an auth failure
+                // while 360dialog's `2` is Meta's transient trouble. One line cannot
+                // drift from `BspProvider`, and `BspAdapterRegistry` refuses to
+                // construct with a partner missing — eight config lines would give a
+                // ninth partner no policy at all, silently.
+                BspGatewayErrorClassifier::class,
             ],
         ],
 

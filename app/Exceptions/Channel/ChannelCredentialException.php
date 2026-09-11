@@ -6,6 +6,7 @@ namespace App\Exceptions\Channel;
 
 use App\Enums\BspProvider;
 use App\Enums\ChannelMode;
+use App\Services\Channel\ChannelCredentials;
 use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
@@ -50,13 +51,40 @@ use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
  * `ErrorClass::Validation` — zero retry attempts — which is the right answer, because a
  * credential set appears when a human enters one, not after a backoff.
  *
- * ## Scope, and who extends it
+ * ## Two flavours, and why a panel must be able to tell them apart
  *
- * Task 6.3 raises exactly one flavour of this: *absent*. Task 7.6 owns validate-before-
- * activate (Req 8.6) and adds the *rejected* flavour — credentials that exist and that the
- * driver's `healthCheck()` refused — as further named constructors here, so a tenant screen
- * can tell "you have not set this up" apart from "your token expired" without matching on a
- * message.
+ * Task 6.3 raised one: *absent*. Task 7.6 added the other: *rejected* — credentials that
+ * exist, that the tenant believes in, and that the driver's `healthCheck()` (or
+ * `register()`) refused. They are one state to a send (there is nothing to authenticate
+ * with) and two entirely different sentences to the tenant, so the difference is carried
+ * rather than described:
+ *
+ * | Constructor | `errorCode()` | The tenant is told | What the tenant does |
+ * |---|---|---|---|
+ * | `missing()` | `channel_credentials_missing` | this mode is not connected yet | enter credentials |
+ * | `rejected()` | `channel_credentials_rejected` | the provider refused these, **and why** | re-issue the token, fix the number |
+ *
+ * A panel that had to match on a message to tell those apart would break the first time a
+ * word of prose changed, and the two remedies are far enough apart that showing the wrong
+ * one sends a tenant to re-type a token that is fine. `ERROR_CODE` keeps its original value
+ * and meaning; read `errorCode()` for the per-instance answer, exactly as
+ * `FeatureNotInPlanException` does with its two codes.
+ *
+ * ## `rejected()` carries the provider's verdict, and cannot carry the provider's echo
+ *
+ * `detail()` is what the driver actually said, which is the whole value of this flavour: an
+ * expired token, a number missing from the WABA, a partner refusing a sender id. It is also
+ * the single most dangerous string in the channel subsystem, because a credential probe's
+ * job is to send a secret somewhere and read the refusal — and Meta and several BSPs quote
+ * part of the `Authorization` header back on a `401` (`ChannelRequestFailedException` makes
+ * this argument at length).
+ *
+ * So `rejected()` accepts a detail **only from a type that has already scrubbed it**:
+ * `ChannelHealth::$detail` and `RegistrationResult::$detail` are both passed through
+ * `ChannelCredentials::redact()` by their own named constructors, neither type has a public
+ * constructor, and that is why. This class re-applies the same length bound and nothing
+ * else — it holds no credentials, so it *cannot* re-scrub values, and pretending otherwise
+ * with a regex would be worse than stating the precondition.
  *
  * ## What may be said out loud
  *
@@ -78,14 +106,25 @@ final class ChannelCredentialException extends RuntimeException implements HttpE
 
     /**
      * Stable machine-readable code for API clients and the panel.
+     *
+     * The *absent* flavour's code, and unchanged since task 6.3 — `ChannelExceptionsTest` and
+     * `ChannelRouterTest` both pin it. A caller that needs the per-instance answer reads
+     * `errorCode()`.
      */
     public const string ERROR_CODE = 'channel_credentials_missing';
+
+    /**
+     * The *rejected* flavour's code: credentials that exist and that the driver refused.
+     */
+    public const string ERROR_CODE_REJECTED = 'channel_credentials_rejected';
 
     private function __construct(
         public readonly ChannelMode $mode,
         public readonly ?BspProvider $provider,
         string $message,
         private readonly string $publicMessage,
+        private readonly string $errorCode = self::ERROR_CODE,
+        private readonly ?string $detail = null,
     ) {
         parent::__construct($message);
     }
@@ -114,9 +153,73 @@ final class ChannelCredentialException extends RuntimeException implements HttpE
         ));
     }
 
+    /**
+     * The credentials exist and the driver refused them (Req 8.6, 8.13 / A8) — task 7.6's
+     * verdict when `healthCheck()` reports unhealthy, or `register()` cannot establish the
+     * number.
+     *
+     * Raised **instead of** activating them, so the tenant's previous working set is still
+     * the one that sends: a rotation that is refused changes nothing a customer could notice.
+     *
+     * `$detail` must come from `ChannelHealth::$detail` or `RegistrationResult::$detail` —
+     * see the class docblock for why a raw provider body must never be handed to this, and
+     * why this class cannot be the thing that scrubs it.
+     */
+    public static function rejected(
+        ChannelMode $mode,
+        string $tenantId,
+        string $detail,
+        ?BspProvider $provider = null,
+    ): self {
+        $detail = self::bounded($detail);
+
+        return new self($mode, $provider, sprintf(
+            'Tenant %s offered credentials for %s%s that the driver refused: %s. They were not '
+            .'activated, so whatever was working before is still working and still sending; '
+            .'nothing was rerouted onto another mode.',
+            self::fingerprint($tenantId),
+            $mode->value,
+            $provider === null ? '' : sprintf(' via provider [%s]', $provider->value),
+            $detail === '' ? 'no reason was given' : $detail,
+        ), sprintf(
+            '%s refused these credentials%s Your previous credentials are unchanged and still '
+            .'in use.',
+            $mode->label(),
+            $detail === '' ? '.' : sprintf(': %s', $detail),
+        ), self::ERROR_CODE_REJECTED, $detail === '' ? null : $detail);
+    }
+
     public function getStatusCode(): int
     {
         return self::STATUS;
+    }
+
+    /**
+     * Which flavour this is, machine-readably — `ERROR_CODE` or `ERROR_CODE_REJECTED`.
+     *
+     * The `FeatureNotInPlanException` shape: one class, two codes, and the instance knows
+     * which it is so no caller has to read a sentence to find out.
+     */
+    public function errorCode(): string
+    {
+        return $this->errorCode;
+    }
+
+    /**
+     * Whether the driver refused credentials that exist, as opposed to there being none.
+     */
+    public function isRejection(): bool
+    {
+        return $this->errorCode === self::ERROR_CODE_REJECTED;
+    }
+
+    /**
+     * What the driver said, scrubbed and bounded — `null` for the *absent* flavour, which has
+     * no driver verdict to report because no driver was asked.
+     */
+    public function detail(): ?string
+    {
+        return $this->detail;
     }
 
     /**
@@ -142,5 +245,20 @@ final class ChannelCredentialException extends RuntimeException implements HttpE
     private static function fingerprint(string $id): string
     {
         return $id === '' ? '<none>' : '#'.substr(hash('sha256', $id), 0, 8);
+    }
+
+    /**
+     * A driver's verdict, trimmed and held to the same length bound the two types that
+     * produce one already apply.
+     *
+     * The bound is re-applied rather than trusted: `ChannelCredentials::MAX_DETAIL_LENGTH` is
+     * the platform's one answer to "how much provider prose may travel", and a `detail`
+     * reaching this constructor from anywhere else must obey it too — an unbounded provider
+     * body is how a response that happens to quote a token ends up copied into a response
+     * payload in full.
+     */
+    private static function bounded(string $detail): string
+    {
+        return mb_strimwidth(trim($detail), 0, ChannelCredentials::MAX_DETAIL_LENGTH, '…');
     }
 }

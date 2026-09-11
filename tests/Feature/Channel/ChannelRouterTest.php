@@ -13,11 +13,15 @@ use App\Models\ChannelCredential;
 use App\Models\Plan;
 use App\Models\Session;
 use App\Models\Tenant;
+use App\Services\Channel\BaileysChannelDriver;
+use App\Services\Channel\BspGatewayChannelDriver;
 use App\Services\Channel\ChannelCredentialStore;
 use App\Services\Channel\ChannelDriver;
 use App\Services\Channel\ChannelRouter;
+use App\Services\Channel\CloudApiChannelDriver;
 use App\Services\Channel\DefaultChannelRouter;
 use App\Services\Channel\ModeGuardedChannelDriver;
+use App\Services\Channel\OnPremiseChannelDriver;
 use App\Services\Tenancy\PlanGate;
 use App\Services\Tenancy\TenantContext;
 use Illuminate\Support\Facades\Cache;
@@ -341,6 +345,72 @@ it('resolves a driver once per tenant and mode, and not once per call', function
     // `scoped()`, so nothing survives the request or the job.
     fakeRouter()->driverFor($acmeSession);
     expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(4);
+});
+
+it('resolves every ChannelMode case through the container registry, wrapped in the mode guard', function (): void {
+    $tenant = routerTenant();
+    credentialEveryMode($tenant);
+
+    // The registry `ChannelServiceProvider::drivers()` supplies, asserted through the real
+    // container rather than through `fakeRouter()` — every other test in this file swaps a fake
+    // registry in, which is what makes them about the router's *rules* and this one about the
+    // wiring. A mode with no entry raises `LogicException` naming it, so a missing line fails
+    // here rather than at the first tenant whose session holds that mode.
+    $expected = [
+        ChannelMode::Baileys->value => BaileysChannelDriver::class,
+        ChannelMode::CloudApi->value => CloudApiChannelDriver::class,
+        ChannelMode::OnPremise->value => OnPremiseChannelDriver::class,
+        ChannelMode::BspGateway->value => BspGatewayChannelDriver::class,
+    ];
+
+    // Keyed off the enum rather than a hand-written list, so a fifth mode fails this assertion
+    // instead of silently having no expectation.
+    expect(array_keys($expected))
+        ->toBe(array_map(static fn (ChannelMode $mode): string => $mode->value, ChannelMode::cases()));
+
+    foreach (ChannelMode::cases() as $mode) {
+        $driver = app(ChannelRouter::class)->driverFor(routerSession($tenant, $mode));
+
+        expect($driver)->toBeInstanceOf(ModeGuardedChannelDriver::class, $mode->value)
+            ->and($driver->mode())->toBe($mode);
+
+        assert($driver instanceof ModeGuardedChannelDriver);
+
+        expect($driver->inner())->toBeInstanceOf($expected[$mode->value], $mode->value)
+            // The guard derives every answer from the mode, so no concrete driver can widen a
+            // `❌` cell or turn the anti-ban ramp off for a web-protocol mode — which includes
+            // `ON_PREMISE`, official *and* web-protocol (Properties 21, 24; Req 8.8).
+            ->and($driver->requiresAntiBan())->toBe($mode->isWebProtocol());
+    }
+});
+
+it('puts forget() on the contract, so a caller that changes a resolution needs no instanceof', function (): void {
+    $acme = routerTenant();
+    credentialEveryMode($acme);
+    $session = routerSession($acme, ChannelMode::CloudApi);
+
+    // Resolved as the **interface**, which is what every collaborator injects — task 7.6's
+    // validator, task 8.6's mode switch. Before `forget()` was on `ChannelRouter` those callers
+    // had to reach for `instanceof DefaultChannelRouter` to drop a memo they had just
+    // invalidated, which is a contract gap dressed up as a defensive check: the memo is not
+    // optional to an implementation that answers `driverFor()` twice with the same instance.
+    // Reaching it through the container is also the half a static analyser checks — this line
+    // does not type-check unless the member is on the contract.
+    app()->instance(ChannelRouter::class, fakeRouter());
+    $router = app(ChannelRouter::class);
+
+    $router->driverFor($session);
+    $router->driverFor($session);
+
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(1);
+
+    $router->forget($acme, ChannelMode::CloudApi);
+    $router->driverFor($session);
+
+    expect(FakeChannelDriver::built(ChannelMode::CloudApi))->toBe(2)
+        // Named on the interface rather than only on the class, so the check above is about
+        // the contract and not about which implementation happened to be bound.
+        ->and((new ReflectionClass(ChannelRouter::class))->hasMethod('forget'))->toBeTrue();
 });
 
 it('binds the router scoped, so no driver survives a unit of work', function (): void {

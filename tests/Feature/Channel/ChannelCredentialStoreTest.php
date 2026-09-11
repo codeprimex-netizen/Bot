@@ -649,6 +649,93 @@ it('remembers a miss, and re-reads it once told to forget', function (): void {
     expect($store->for($tenant, ChannelMode::CloudApi))->not->toBeNull();
 });
 
+it('drops the mode-wide remembered miss when a partner\'s first set is written, not only the partner\'s own', function (): void {
+    $tenant = Tenant::factory()->create();
+    $store = credentialStore();
+
+    // The lookup `DefaultChannelRouter::hasCredentials()` makes: is there anything usable for
+    // this tenant on this mode, **no partner named**. A miss is remembered like a hit.
+    expect($store->rowFor($tenant, ChannelMode::BspGateway))->toBeNull();
+
+    $store->put(
+        $tenant,
+        ChannelMode::BspGateway,
+        ['auth_token' => 'twilio-first-token'],
+        ['base_url' => 'https://api.twilio.com', 'sender' => '919812345678'],
+        provider: BspProvider::Twilio,
+    );
+
+    // `put()` forgets by `(tenant, mode, provider)`, and the memo key of the lookup above
+    // names no provider — so a `{tenant}|{mode}|{provider}|` prefix does not reach it. Without
+    // this, the remembered "this tenant has no BSP credentials" outlives the write that gave it
+    // some, and routing refuses a BSP driver for the rest of the request or job that
+    // configured the partner.
+    expect($store->rowFor($tenant, ChannelMode::BspGateway)?->provider)->toBe(BspProvider::Twilio)
+        // The partner-specific lookup was never the problem, and still is not.
+        ->and($store->rowFor($tenant, ChannelMode::BspGateway, BspProvider::Twilio))->not->toBeNull();
+});
+
+it('drops the mode-wide remembered miss on an explicit forget() for one partner', function (): void {
+    $tenant = Tenant::factory()->create();
+    $store = credentialStore();
+
+    expect($store->rowFor($tenant, ChannelMode::BspGateway))->toBeNull();
+
+    // A row written behind the store's back — which is what task 7.6's `activate()` amounts to
+    // once it has stamped `verified_at` on a row it holds — followed by the one call the
+    // interface documents. One call has to be enough: a caller cannot be expected to know that
+    // a partner-scoped `forget()` leaves a mode-wide memo standing.
+    app(TenantContext::class)->runFor($tenant, function () use ($tenant): void {
+        ChannelCredential::factory()->forMode(ChannelMode::BspGateway, BspProvider::Gupshup)->create([
+            'tenant_id' => $tenant->id,
+        ]);
+    });
+
+    $store->forget($tenant, ChannelMode::BspGateway, BspProvider::Gupshup);
+
+    expect($store->rowFor($tenant, ChannelMode::BspGateway)?->provider)->toBe(BspProvider::Gupshup);
+});
+
+it('breaks a same-second verification tie by id, so a rotation validated in the same second takes over', function (): void {
+    $tenant = Tenant::factory()->create();
+    $store = credentialStore();
+
+    // The clock frozen, so both sets carry the same `verified_at` **and** the same
+    // `created_at` — both second-resolution columns. This is not a contrived instant: task
+    // 7.6 writes a candidate and stamps it the moment the driver answers, which for a
+    // healthy provider is well inside the second the previous set was verified in.
+    thisTest()->freezeTime();
+
+    $previous = null;
+    $rotated = null;
+
+    app(TenantContext::class)->runFor($tenant, function () use ($tenant, &$previous, &$rotated): void {
+        $previous = ChannelCredential::factory()->labelled('previous')->create([
+            'tenant_id' => $tenant->id,
+            'verified_at' => now(),
+        ]);
+        $rotated = ChannelCredential::factory()->labelled('rotated')->create([
+            'tenant_id' => $tenant->id,
+            'verified_at' => now(),
+        ]);
+    });
+
+    assert($previous instanceof ChannelCredential && $rotated instanceof ChannelCredential);
+
+    // ULID primary keys are monotonic (`Str::ulid()`, Symfony's `Ulid::generate()`, which
+    // increments the random component within one millisecond), so "the newer row" is a fact
+    // the id already carries and the tie has a defined answer available to it.
+    expect(strcmp($rotated->id, $previous->id))->toBeGreaterThan(0)
+        ->and($store->rowFor($tenant, ChannelMode::CloudApi)?->label)->toBe('rotated')
+        // …and the model's own query, which the panel and `ChannelHealth` read.
+        ->and(app(TenantContext::class)->runFor(
+            $tenant,
+            fn (): ?ChannelCredential => ChannelCredential::activeFor(ChannelMode::CloudApi),
+        )?->label)->toBe('rotated')
+        // …and `all()`, whose first usable element must stay the row `rowFor()` answers with.
+        ->and($store->all($tenant, ChannelMode::CloudApi)[0]->label)->toBe('rotated');
+});
+
 it('is bound scoped, so the memo cannot outlive a request or a job', function (): void {
     $first = credentialStore();
 
