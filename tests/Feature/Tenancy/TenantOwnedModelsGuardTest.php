@@ -1,0 +1,219 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Models\ChannelWebhookRoute;
+use App\Models\Concerns\BelongsToTenant;
+use App\Models\IdempotencyKey;
+use App\Models\OutboxMessage;
+use App\Models\SigningSecret;
+use App\Models\Tenant;
+use App\Models\TenantApiToken;
+use App\Models\TenantDomain;
+use App\Models\TenantUsage;
+use App\Models\TenantUser;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Symfony\Component\Finder\Finder;
+
+/*
+|--------------------------------------------------------------------------
+| The tenancy rule, enforced automatically (Req 1.1, 1.2 / A1)
+|--------------------------------------------------------------------------
+| Isolation only holds if *every* tenant-owned table follows the same two steps:
+| `TenantSchema::tenantId()` in the migration, `BelongsToTenant` on the model. The
+| engine tables of later phases (`sessions_wa`, `messages`, `contacts`, `campaigns`,
+| `chatbots`, `orders`, ...) do not exist yet — so instead of trusting a reviewer to
+| remember the rule when they arrive, these tests derive the list of tenant-owned
+| tables from the *live schema* and hold every one of them to it.
+|
+| A phase-12 migration that adds `tenant_id` without the trait fails here, on the
+| task that added it.
+*/
+
+/**
+ * Tables that carry `tenant_id` but deliberately do not get `BelongsToTenant`,
+ * with the reason. Every entry is a reviewed decision, not an omission — and the
+ * last test in this file keeps the list honest.
+ *
+ * @return array<class-string<Model>, string>
+ */
+function tenantScopeExemptions(): array
+{
+    return [
+        // The table that answers "which tenant is acting?" cannot be filtered by the
+        // answer: tenant resolution reads it by user_id before any tenant is bound.
+        // See the TenantUser docblock for the full reasoning.
+        TenantUser::class => 'identity/resolution tier: read by user_id before a tenant exists',
+
+        // Reliability tier (task 3.1, Req 31.2, 31.4 / NFR2). Both tables keep a
+        // *nullable* tenant_id for attribution and offboarding cascade, and null is a
+        // legitimate value: platform-level effects and pre-tenant-resolution webhook
+        // dedup have no tenant. BelongsToTenant cannot write a null tenant_id — its
+        // creating hook throws MissingTenantContextException instead — so the trait
+        // would make legal rows impossible, and the relay/intake workers that read
+        // these tables run with no tenant bound at all. Isolation is provided
+        // explicitly instead: OutboxMessage::forTenant() names its tenant at the call
+        // site, and idempotency scopes carry the tenant in the key where it matters.
+        // See each migration's docblock for the full argument.
+        OutboxMessage::class => 'reliability tier: nullable tenant_id; the relay runs with no tenant bound',
+        IdempotencyKey::class => 'reliability tier: nullable tenant_id; webhook dedup runs before tenant resolution',
+
+        // Security tier (task 4.2, Req 32.6 / NFR3). Same two reasons as the reliability
+        // tier. First, null is a legitimate value: a payment gateway's webhook secret
+        // belongs to the platform, not to a tenant, and BelongsToTenant cannot write a null
+        // tenant_id. Second — and this is the decisive one — verifying an inbound webhook's
+        // HMAC is what *identifies* the session and therefore the tenant, so the read
+        // happens before any tenant is bound; the rotation sweep runs in the console with
+        // none bound either. Isolation is carried by the `scope` string (which embeds the
+        // tenant or session id) and by the AAD each secret is sealed with, so a row cannot
+        // be moved between scopes. See the migration docblock.
+        SigningSecret::class => 'security tier: nullable tenant_id; HMAC verification runs before tenant resolution',
+
+        // Resolution tier (task 5.1, Req 9.3, 9.7 / A9) — the same argument as tenant_users,
+        // one level up. `tenant_domains` is read to answer "which tenant owns this host?",
+        // which task 5.5's routing asks *before* a tenant is bound, so the table cannot be
+        // filtered by the answer it provides. It must also be readable across tenants for a
+        // second reason the other exemptions do not have: the table carries a **global**
+        // `unique(host)` — one domain, one owner, because two tenants claiming one host is a
+        // hijack — and Req 9.7's "already in use" refusal cannot be explained if another
+        // tenant's claim is invisible to the query that checks. Isolation is carried by the
+        // access path: every read names its tenant explicitly
+        // (`TenantDomain::canonicalHostFor($tenantId)`), and only *verified* rows can reach
+        // URL generation. See the TenantDomain docblock and its migration.
+        TenantDomain::class => 'resolution tier: read by host before a tenant is bound; unique(host) is global by design',
+
+        // Resolution tier (task 6.1, Req 8.4 / A8; Req 9.2 / A9) — the same argument as
+        // `tenant_domains`, for inbound provider webhooks instead of inbound browser
+        // requests. A Meta or BSP callback arrives with no panel session, no subdomain and
+        // no API key: the `route_key` in its URL is the only tenant-bearing thing about it,
+        // so this table is what *establishes* the tenant context and cannot be filtered by
+        // the answer it provides. `unique(route_key)` is therefore **global** — two tenants
+        // holding one key would be an ambiguity resolvable only by guessing which one a
+        // callback meant. Isolation is carried by the key: it is unguessable (task 5.6 mints
+        // it; `UrlBuilder::webhook()` pins its shape), it names exactly one session rather
+        // than a tenant's estate, and the payload is still signature-verified by that
+        // session's driver before anything is believed. Every outbound read names its tenant
+        // explicitly (`ChannelWebhookRoute::scopeForTenant()`). See the model docblock and
+        // its migration.
+        ChannelWebhookRoute::class => 'resolution tier: resolved by route_key before a tenant is bound; unique(route_key) is global by design',
+    ];
+}
+
+/**
+ * Every concrete Eloquent model under `app/Models`.
+ *
+ * @return list<class-string<Model>>
+ */
+function eloquentModels(): array
+{
+    $models = [];
+
+    foreach (Finder::create()->files()->in(app_path('Models'))->name('*.php') as $file) {
+        /** @var class-string<Model> $class */
+        $class = 'App\\Models\\'.str_replace(
+            '/',
+            '\\',
+            Str::before($file->getRelativePathname(), '.php')
+        );
+
+        if (! class_exists($class)) {
+            continue;
+        }
+
+        $reflection = new ReflectionClass($class);
+
+        if ($reflection->isAbstract() || ! $reflection->isSubclassOf(Model::class)) {
+            continue;
+        }
+
+        $models[] = $class;
+    }
+
+    sort($models);
+
+    return $models;
+}
+
+/**
+ * Models whose table carries a `tenant_id` column.
+ *
+ * @return list<class-string<Model>>
+ */
+function tenantOwnedModels(): array
+{
+    return array_values(array_filter(eloquentModels(), static function (string $class): bool {
+        $table = (new $class)->getTable();
+
+        return Schema::hasTable($table) && Schema::hasColumn($table, 'tenant_id');
+    }));
+}
+
+it('finds the models it is meant to guard', function (): void {
+    // A discovery bug would make every other test in this file vacuously pass, so the
+    // models that exist today are named explicitly.
+    expect(eloquentModels())->toContain(Tenant::class, TenantUsage::class, TenantApiToken::class, TenantUser::class)
+        ->and(tenantOwnedModels())->toContain(TenantUsage::class, TenantApiToken::class, TenantUser::class)
+        ->and(tenantOwnedModels())->not->toContain(Tenant::class, User::class);
+});
+
+it('uses BelongsToTenant on every model whose table carries tenant_id', function (): void {
+    $exempt = tenantScopeExemptions();
+    $missing = [];
+
+    foreach (tenantOwnedModels() as $class) {
+        if (array_key_exists($class, $exempt)) {
+            continue;
+        }
+
+        if (! in_array(BelongsToTenant::class, class_uses_recursive($class), true)) {
+            $missing[] = $class;
+        }
+    }
+
+    expect($missing)->toBe([], sprintf(
+        'These models own tenant data but do not use BelongsToTenant, so their queries are not '
+        .'isolated: %s. Add the trait, or record a reviewed exemption in tenantScopeExemptions().',
+        implode(', ', $missing),
+    ));
+});
+
+it('indexes every tenant_id column with an index that leads with it', function (): void {
+    $unindexed = [];
+
+    foreach (tenantOwnedModels() as $class) {
+        $table = (new $class)->getTable();
+
+        $leads = collect(Schema::getIndexes($table))
+            ->contains(fn (array $index): bool => ($index['columns'][0] ?? null) === 'tenant_id');
+
+        if (! $leads) {
+            $unindexed[] = $table;
+        }
+    }
+
+    expect($unindexed)->toBe([], sprintf(
+        'These tables have a tenant_id column but no index leading with it, so every scoped query '
+        .'scans them: %s. Declare the column with TenantSchema::tenantId().',
+        implode(', ', $unindexed),
+    ));
+});
+
+it('never scopes the tenant itself, the root of the ownership tree', function (): void {
+    expect(class_uses_recursive(Tenant::class))->not->toContain(BelongsToTenant::class)
+        ->and(Schema::hasColumn('tenants', 'tenant_id'))->toBeFalse();
+});
+
+it('keeps the exemption list honest', function (): void {
+    foreach (tenantScopeExemptions() as $class => $reason) {
+        $table = (new $class)->getTable();
+
+        expect($reason)->not->toBe('')
+            ->and(Schema::hasColumn($table, 'tenant_id'))->toBeTrue()
+            // An exempt model that has since gained the trait should leave the list,
+            // so the list only ever describes reality.
+            ->and(class_uses_recursive($class))->not->toContain(BelongsToTenant::class);
+    }
+});

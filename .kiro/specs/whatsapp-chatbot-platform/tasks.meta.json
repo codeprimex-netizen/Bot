@@ -1,0 +1,1491 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "0.1 Create `tenants`, `tenant_users`, `tenant_usage` migrations and Eloquent models with backed enums (`TenantStatus`, `QuotaKind`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921605990
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921629987
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788922336083
+      }
+    ],
+    "0.2 Implement `TenantContext` (`current`/`set`/`actingAsPlatform`/`forget`) with per-request resolution by panel session, subdomain, and API key": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921605999
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788923552993
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788924593455
+      }
+    ],
+    "0.3 Implement `BelongsToTenant` trait: global `TenantScope` + auto-fill `tenant_id` on `creating`; add the trait, `tenant_id` column, and `idx(tenant_id, ...)` to all 22 reused engine tables via migrations": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606007
+      }
+    ],
+    "0.4 Add `CrossTenantAccessException` (403) and a defense-in-depth ownership check on find-by-id / relation-load paths": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606015
+      }
+    ],
+    "0.5 Namespace WhatsApp auth-state, exports, and media under `storage/tenants/{tenantId}/` with ULID filenames": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606022
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788923554126
+      },
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788924594574
+      }
+    ],
+    "1.1 Create `tenant_tiers` migration/model and implement `TierResolver` (`tierOf`/`laneWeight`/`connection`) for `SHARED`/`DEDICATED_WORKER`/`DEDICATED_DB` as a config flip (shard router via `connection`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606030
+      }
+    ],
+    "1.2 Implement `TenantLifecycle::provision` — atomically create tenant record, wallet, default chatbot, per-tenant DEK, storage prefix, and seed plan": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606038
+      }
+    ],
+    "1.3 Implement `TenantLifecycle::suspend` (block outbound, keep inbound log, panels read-only) and the state machine TRIAL→ACTIVE→SUSPENDED→CANCELLED transitions": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606053
+      }
+    ],
+    "1.4 Implement a weighted-fair (deficit round-robin) dispatch scheduler keyed by `tenant_tiers.lane_weight`, skipping rate-capped tenants in the loop": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606061
+      }
+    ],
+    "2.1 Create `plans` migration/model (feature flags JSON, limits JSON per `QuotaKind`) with active/sort indexes and version-bump cache invalidation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606070
+      }
+    ],
+    "2.2 Implement `PlanGate::allows/authorize` + `FeatureNotInPlanException` (402/403)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606077
+      }
+    ],
+    "2.3 Implement `QuotaGuard::verdict/consume/remaining` with atomic `Cache::lock(\"quota:{tenant}:{kind}\")` updates on `tenant_usage`; monthly/daily period bucketing; consume-once keyed by idempotency key": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606085
+      }
+    ],
+    "2.4 Add `QuotaExceededException` (429, defer-until-reset) and a period-reset scheduled command that auto-resumes `QUOTA_PAUSED` work": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606092
+      }
+    ],
+    "3.1 Create `circuit_breakers`, `outbox`, `idempotency_keys`, `sagas`, `saga_steps` migrations/models with enums (`CircuitState`, `OutboxStatus`, `SagaStatus`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606100
+      }
+    ],
+    "3.2 Implement `CircuitBreaker::call/state/trip` (Algorithm 7): `(scope,name)` scoped + persisted + cached; open after ≥5 fails/30s or >50% err over 20; 30s open; 3 HALF_OPEN probes; never invoke while OPEN": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606115
+      }
+    ],
+    "3.3 Implement `Outbox::enqueue/relay` (Algorithm 6) + a relay worker: enqueue inside the state-change transaction; deliver with `dedup_key` header; `FOR UPDATE SKIP LOCKED`; backoff-with-jitter retries": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606123
+      }
+    ],
+    "3.4 Implement `IdempotencyStore::once(scope,key,op)` for generic side-effect dedup": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606131
+      }
+    ],
+    "3.5 Implement `SagaOrchestrator::run` (Algorithm 8) with persisted steps, idempotent forward actions, and reverse-order idempotent compensations": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606137
+      }
+    ],
+    "3.6 Implement `RetryPolicy` (exponential base 250ms + full jitter, cap 30s) and the per-error-class retry/backoff matrix": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606145
+      }
+    ],
+    "4.1 Create `encryption_keys` migration/model and implement `FieldCipher` (per-tenant KMS-wrapped DEK; `encrypt`/`decrypt`/`rotate`; fail-closed `KeyUnavailableException`, no plaintext fallback)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606153
+      }
+    ],
+    "4.2 Implement a `KmsClient` interface + real KMS/Vault adapter and `FakeKms` (test only); scheduled master-key + per-tenant DEK rotation and dual-secret HMAC rotation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606161
+      }
+    ],
+    "4.3 Create append-only `audit_logs` (revoke UPDATE/DELETE grants for the app role) with hash-chaining `row_hash = H(prev_hash || canonical(payload))`; implement `AuditService::write/verify`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606168
+      }
+    ],
+    "4.4 Implement `PiiRedactor::redact/rehydrate` (mask phone/email/card-like + configurable tenant patterns; reversible in-request token map) and log redaction (phone-redacted, bodies hashed only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606175
+      }
+    ],
+    "4.5 Implement `Guardrail::inspectInput/inspectOutput` (instruction hierarchy, injection classifier, delimiter fencing, output validation) writing to `abuse_events`; anti-fraud signup velocity/OTP/device-IP heuristics and per-session kill-switch": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606184
+      }
+    ],
+    "4.6 Document + implement STRIDE per-boundary mitigations (webhook HMAC, gateway signature+idempotency, RBAC+scope, PII egress, vector filter, audit chain, fair scheduling)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606193
+      }
+    ],
+    "5.1 Implement `BaseUrl` (`platform`/`forTenant`) resolving precedence: per-tenant verified custom domain → `platform_settings['base_url']` → `config('app.url')`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606200
+      }
+    ],
+    "5.2 Implement `UrlBuilder` (`absolute`/`webhook`/`signed`/`tenantSubdomain`); build all URLs from the canonical base, never from `Host`/`X-Forwarded-Host`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606208
+      }
+    ],
+    "5.3 Implement signed/expiring URL generation binding the canonical host into the signature; reject expired, >3600s window, or host-mismatched signatures": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606215
+      }
+    ],
+    "5.4 Configure Laravel `TrustHosts`/`TrustProxies` allowlist (platform apex + verified tenant subdomains + verified custom domains); reject non-allowlisted hosts": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606223
+      }
+    ],
+    "5.5 Implement subdomain routing (`tenant.{slug}.{apex}`) and verified custom-domain routing (DNS/ACME ownership challenge + TLS check; unverified excluded; collision/reserved-name rejection)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606231
+      }
+    ],
+    "5.6 Wire per-mode + payment-gateway webhook callback registration through `UrlBuilder::webhook`, storing `route_key` in `channel_webhook_routes`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606238
+      }
+    ],
+    "6.1 Add `sessions_wa.channel_mode` column (enum, default `BAILEYS`, `idx(tenant_id, channel_mode)`); create `channel_credentials`, `cloud_api_templates`, `channel_webhook_routes`, `channel_send_log` migrations/models; add `ChannelMode`, `ChannelCapability`, `BspProvider` enums": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606245
+      }
+    ],
+    "6.2 Define `ChannelDriver` interface extending `BridgeClient` (`mode`/`supports`/`requiresAntiBan`/`send`/`parseWebhook`/`sendTemplate`/`register`/`healthCheck`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606253
+      }
+    ],
+    "6.3 Implement `ChannelRouter` (`driverFor`/`driverForMode`/`failoverChain`/`assertSupported`) — exactly-one-driver routing by `session.channel_mode`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606260
+      }
+    ],
+    "6.4 Implement `ChannelCredentialStore` (`for`/`put`) — per-tenant per-mode credentials, envelope-encrypted via `FieldCipher`, secret-redacted, decrypted in-request only": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606268
+      }
+    ],
+    "7.1 Implement `BaileysChannelDriver` wrapping the existing `HttpBridgeClient` (full capability set, `requiresAntiBan()=true`), unchanged behaviour for existing tenants": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606277
+      }
+    ],
+    "7.2 Implement `CloudApiChannelDriver` (Meta Cloud API: single/bulk/media/template/interactive, verify-token webhook, delivery receipts, WABA registration; no groups/channels/extraction → `ModeCapabilityException`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606290
+      }
+    ],
+    "7.3 Implement `OnPremiseChannelDriver` (legacy self-hosted; `requiresAntiBan()=true`; marked deprecated with documented `ON_PREMISE→CLOUD_API` migration path)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606304
+      }
+    ],
+    "7.4 Implement `BspGatewayChannelDriver` with per-provider adapters (Twilio/360dialog/Gupshup/Vonage/MessageBird/Infobip/WATI/Kaleyra) resolving a per-provider capability sub-matrix at runtime": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606322
+      }
+    ],
+    "7.5 Implement `FakeChannelDriver` (test-only, configurable capabilities, deterministic) bound only in the testing container": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606330
+      }
+    ],
+    "7.6 Implement per-mode credential validation on save/rotate: validate with driver before activating; retain previous working creds on failure with `ChannelCredentialException`; keep platform on `BAILEYS` default when creds missing/invalid": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606336
+      }
+    ],
+    "8.1 Extend the send pipeline into `channelSendGate` (Algorithm 9): resolve driver → capability gate → branch anti-ban (web-protocol) vs provider template/24h-window/rate rules (official)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606344
+      }
+    ],
+    "8.2 Implement the capability handshake: on create/mode-change, invoke `supports()` once and persist the authoritative capability set used for all subsequent gating": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606351
+      }
+    ],
+    "8.3 Implement mode-aware inbound webhook routing: resolve `(tenant, session, driver)` via `channel_webhook_routes.route_key`, parse via that driver (Baileys HMAC / Meta verify-token+signature / BSP signature) into canonical `InboundEvent`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606358
+      }
+    ],
+    "8.4 Implement official-mode template flow: sync/approval status against `cloud_api_templates`; block free-form outside the 24h window without an approved template with `TemplateRequiredException`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606366
+      }
+    ],
+    "8.5 Implement multi-mode failover: advance the ordered `failoverChain` on primary breaker OPEN or exhausted-retry; re-enable anti-ban when falling back to web-protocol; attempt each mode at most once; mark failed + audit exhaustion; audit each failover with source/target/reason": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606373
+      }
+    ],
+    "8.6 Implement mode-switch queue drain: stop admitting to old driver, drain/fail queued sends, re-run `supports()`, re-evaluate anti-ban vs official gate, audit old/new mode + drained/failed counts": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606380
+      }
+    ],
+    "9.1 Enforce per-tenant `SESSIONS` quota in `SessionManager::create`; record `channel_mode`; call `driver->register()` for official modes before marking live; map each session to exactly one tenant": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606388
+      }
+    ],
+    "9.2 Ensure auto-reconnect policy runs per session without affecting other tenants; scope all bridge/driver calls to owned session IDs": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606395
+      }
+    ],
+    "9.3 Implement `tenantSendGate` (Algorithm 3) composed with `channelSendGate`: plan gate → monthly/daily quota → anti-ban (mode-branched); consume quota once after confirm, keyed by idempotency key; release (never drop) on defer": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606403
+      }
+    ],
+    "9.4 Implement single/dual/auto-bulk/bulk-media/scheduled (once + recurring)/versioned-template sends, all tenant-scoped and mode-aware": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606411
+      }
+    ],
+    "9.5 Track delivery status (sent/delivered/read) with `rank()`-based out-of-order-ack suppression (no downgrade)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606418
+      }
+    ],
+    "9.6 Apply anti-ban per tenant on web-protocol modes (gaussian delay, typing sim, warm-up ramp, quiet hours, spintax, batch cool-down, risk scoring); no bypass parameter; stricter of plan vs config; throttle+alert on risk threshold": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606425
+      }
+    ],
+    "9.7 Enforce opt-out per tenant inside `RecipientResolver` on every outbound path with no bypass": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606433
+      }
+    ],
+    "10.1 Create `subscriptions`, `wallets`, `wallet_txns`, `invoices`, `coupons`, `payment_events` migrations/models with enums (`SubscriptionStatus`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606440
+      }
+    ],
+    "10.2 Implement `PaymentGateway` interface + `RazorpayGateway`, `StripeGateway`, `UpiLinkGateway`, and `FakeGateway` (test only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606446
+      }
+    ],
+    "10.3 Implement `SubscriptionService` (subscribe/changePlan+prorate/cancel/onGatewayEvent) idempotent on `payment_events.gateway_event_id`; dunning/PAST_DUE handling": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606454
+      }
+    ],
+    "10.4 Implement `WalletService` (balance/topUp idempotent by source ref/debit never-below-zero under `Cache::lock`) + `InsufficientFundsException`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606461
+      }
+    ],
+    "10.5 Implement `InvoiceService` (sequential number, PDF via dompdf, signed-URL delivery) + revenue reports from `metrics_rollup`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606468
+      }
+    ],
+    "10.6 Implement `CouponService` redemption math, limits, and expiry": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606476
+      }
+    ],
+    "10.7 Implement the gateway webhook controller with signature verification and exactly-once processing via `IdempotencyStore` + outbox": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606483
+      }
+    ],
+    "11.1 Create `chatbots`, `conversations`, `conversation_states`, `messages_inbound`, `handoff_events` migrations/models with enums (`ConversationMode`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606492
+      }
+    ],
+    "11.2 Implement `HandleInboundMessageJob` (`ShouldBeUnique` on `wa_message_id`) dispatched on the `ai-reply` lane after driver signature verify + tenant/session resolution": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606501
+      }
+    ],
+    "11.3 Implement `ConversationEngine::handle` + `ResolverStage` contract and the fixed-order pipeline (Algorithm 1) with single-reply guarantee and suspended-tenant halt (log, no reply)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606508
+      }
+    ],
+    "11.4 Implement `OptOutStage` (STOP/UNSUBSCRIBE → record + confirm + HALT), `LiveAgentStage`, `BusinessHoursStage` (away message), `FallbackStage`; each plan-gated/skippable": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606516
+      }
+    ],
+    "12.1 Create `keyword_triggers`, `intents`, `knowledge_base` migrations/models": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606524
+      }
+    ],
+    "12.2 Implement `KeywordTriggerStage` (EXACT/CONTAINS/REGEX, priority-ordered; highest-priority-only on multi-match)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606532
+      }
+    ],
+    "12.3 Implement `IntentFaqStage` (rule-based intent detection → configured FAQ answer)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606539
+      }
+    ],
+    "12.4 Implement rich `OutboundContent` variants (reply buttons, list message, product/catalog) with degradation to numbered-text menu when the session/mode can't render them": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606547
+      }
+    ],
+    "13.1 Create `kb_chunks` (FULLTEXT on content), `embeddings`, `semantic_cache`, `llm_usage`, `prompt_templates` migrations/models with `RagDriver` enum": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606555
+      }
+    ],
+    "13.2 Implement `VectorStore` interface (`upsert`/`search`/`delete`/`driver`) + `QdrantVectorStore`, `PgvectorVectorStore`, `MysqlVectorStore` (brute-force cosine fallback), and `FakeVectorStore` (test only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606563
+      }
+    ],
+    "13.3 Implement `Embedder` interface + real provider (batch 96) and `FakeEmbedder` (test only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606572
+      }
+    ],
+    "13.4 Implement `KbIngestionJob`: loaders → normalize → recursive structural chunking (512 tok / 64 overlap) → embed → upsert to vector store + FULLTEXT mirror; checksum de-dup, re-embed changed only": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606579
+      }
+    ],
+    "13.5 Implement `Retriever` (hybrid dense ANN top-k=20 + lexical FULLTEXT top-k=20 → RRF → rerank to top-n=5 via cross-encoder or LLM-as-reranker) with tenant_id payload filter on every query": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606586
+      }
+    ],
+    "13.6 Implement query-time degradation: embedding provider down → FULLTEXT-only + `rag.degraded`; vector store down → FULLTEXT-only + `rag.degraded`; never crash the job": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606594
+      }
+    ],
+    "14.1 Implement `ConversationMemory::assemble` (system+guardrails+summary+recent verbatim ≤8+RAG top-n) within the per-request token budget with bucketed trimming": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606601
+      }
+    ],
+    "14.2 Implement `MemoryCompactor::compact` (Algorithm 5): slide oldest turns into the rolling summary (cheap model), no turn dropped-and-unsummarized; `remember` episodic upsert": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606608
+      }
+    ],
+    "14.3 Implement context-budget trimming: trim RAG chunks by descending score then oldest turns until fit, never dropping system prompt/guardrails": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606617
+      }
+    ],
+    "15.1 Implement `PromptTemplate` rendering + versioning (rollback-able, cached)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606625
+      }
+    ],
+    "15.2 Wire `Guardrail` input/output inspection + `PiiRedactor` egress redaction into the LLM stage; suppress + log prompt-injection to `abuse_events`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606631
+      }
+    ],
+    "15.3 Implement structured output (JSON-schema validation + exactly one repair retry → rule-based fallback)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606639
+      }
+    ],
+    "16.1 Implement semantic reply cache: lookup normalized+embedded query at cosine ≥ 0.95 within same (tenant, chatbot, KB version, template version); return cached reply, skip LLM": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606646
+      }
+    ],
+    "16.2 Implement cache invalidation on KB re-ingest or prompt-template version bump (no stale-version or cross-tenant hit)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606653
+      }
+    ],
+    "16.3 Implement `ModelRouter` cheap→strong escalation (escalate only on confidence < 0.55, empty RAG grounding, or repair-retry failure)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606662
+      }
+    ],
+    "16.4 Implement `LlmProvider` interface + `OpenAiProvider`, `GeminiProvider`, `FakeLlmProvider` (reply/detectIntent/detectLanguage/sentiment)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606670
+      }
+    ],
+    "16.5 Implement the fallback chain (primary → secondary → local heuristic FAQ/templated) guarded by per-provider + per-tenant `CircuitBreaker`; token accounting to `llm_usage` idempotent per `request_id`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606678
+      }
+    ],
+    "16.6 Implement `LlmReplyStage`: AI-enabled + `AI_CREDITS` gate (0 → skip, no LLM/embedding call); confidence <0.55 or handoff-intent → escalate (no AI reply); 0.55–0.70 grounded → hedged reply + \"type AGENT\"; provider error/timeout → skip, record breaker failure, never crash": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606686
+      }
+    ],
+    "16.7 Implement multi-language reply (detect + reply in detected language) and per-message sentiment with rolling average per conversation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606697
+      }
+    ],
+    "17.1 Create `flows` migration/model (graph JSON, versions, status) with `FlowNodeType` enum": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606704
+      }
+    ],
+    "17.2 Implement `FlowValidator::validate` (Algorithm 4): exactly one entry, reachability, default/else edges on branch nodes, termination; block publish on invalid": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606712
+      }
+    ],
+    "17.3 Implement `FlowRuntime` (start/resume/evaluateNode, Algorithm 2) for all node types; persist current node + variables in `conversation_states` (stateless runtime)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606718
+      }
+    ],
+    "17.4 Implement `ActiveFlowStage` (resume mid-flow at correct pipeline priority)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606725
+      }
+    ],
+    "17.5 Build the Livewire + Alpine drag-and-drop canvas producing graph JSON with live validation feedback and failing-node highlight": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606733
+      }
+    ],
+    "18.1 Create `leads`, `lead_forms`, `orders`, `catalog_items`, `campaign_sequences`, `sequence_enrollments` migrations/models": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606740
+      }
+    ],
+    "18.2 Implement lead-capture form nodes writing to `leads`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606747
+      }
+    ],
+    "18.3 Implement the order/booking bot (catalog browse → cart → order)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606755
+      }
+    ],
+    "18.4 Wire order payment to `PaymentGateway::createPaymentLink` (built from canonical Base URL); include link in reply; reconcile on gateway webhook": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606762
+      }
+    ],
+    "18.5 Implement the order→payment→fulfilment saga via `SagaOrchestrator` with per-step idempotent compensations (release reservation, void link, cancel+refund)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606769
+      }
+    ],
+    "18.6 Implement the drip/re-engagement engine advancing `sequence_enrollments` at `next_run_at`, respecting opt-out, quiet hours, and quota (no bypass)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606777
+      }
+    ],
+    "19.1 Create `agents_registry`, `tools_registry`, `ab_tests`, `ab_assignments`, `flow_analytics_events`, `media_transcripts` migrations/models with enums (`AgentKind`, `FlowAnalyticsEvent`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606784
+      }
+    ],
+    "19.2 Implement action nodes (webhook / CRM / Google Sheets) as retry-safe queued work": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606791
+      }
+    ],
+    "19.3 Implement `AgentRouter` + `Skill` multi-agent orchestration (router classifies → specialist), falling back to single-agent LLM when no router configured": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606799
+      }
+    ],
+    "19.4 Implement `ToolRegistry` (`schemas`/`invoke`) with JSON-Schema validation and idempotent invocation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606807
+      }
+    ],
+    "19.5 Implement `AbTester` (sticky per-unit variant assignment + metric recording; control for everyone when disabled) and flow funnels from `flow_analytics_events` rolled into `metrics_rollup`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606814
+      }
+    ],
+    "19.6 Implement `SpeechToText` interface + real provider and `FakeStt` (test only); transcribe inbound voice notes to `media_transcripts` into the pipeline; degrade to \"please type\" when unbound; optional `TextToSpeech` degrading to text": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606822
+      }
+    ],
+    "19.7 Implement conversation search: MySQL FULLTEXT (always on) + semantic vector search where available (degrade to FULLTEXT)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606830
+      }
+    ],
+    "19.8 Implement per-node conversation analytics/reports (volume, resolution, handoff rate, sentiment, funnels) scoped to tenant": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606837
+      }
+    ],
+    "20.1 Implement `HandoffService` (request/assign/release/agentSend) with mode transitions + `handoff_events`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606845
+      }
+    ],
+    "20.2 Enforce agent-only silence: bot enqueues zero replies while `mode = AGENT`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606853
+      }
+    ],
+    "20.3 Route agent sends through the same anti-ban/plan-gated pipeline (no exemption)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606859
+      }
+    ],
+    "20.4 Build the Live Inbox Livewire component (`wire:poll`), assignment, SLA/unassigned-timeout auto-escalation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606867
+      }
+    ],
+    "21.1 Implement `GroupAdminGuard` (`assertBotIsAdmin`/`botIsAdmin`) throwing `NotGroupAdminException` before any bridge mutation; gate all group ops with `ChannelRouter::assertSupported($s, Groups)`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606874
+      }
+    ],
+    "21.2 Implement `GroupService::create/delete/updateMetadata` (name/description/icon), tenant-scoped, capability-gated": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606882
+      }
+    ],
+    "21.3 Implement invite-link ops: `inviteLink` (get), `revokeInviteLink` (rotate), `joinViaLink`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606889
+      }
+    ],
+    "21.4 Implement `addParticipants/removeParticipants/promote/demote` with deterministic WA status-code mapping to `ADDED`/`INVITE_SENT`/`ALREADY_MEMBER`/`FAILED`; idempotent on request key (apply at most once, return original per-target status on retry)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606897
+      }
+    ],
+    "21.5 Implement `setSettings` (announcement/locked/ephemeral/approval) requiring bot-admin and writing `{group, field, from, to, actor}` audit records": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606904
+      }
+    ],
+    "21.6 Implement transport-error handling: bridge unreachable → retryable error, state unchanged, job released (no partial result); per-group serialization of mutating ops (lock)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606912
+      }
+    ],
+    "22.1 Implement join-request inbox (`pendingJoinRequests`/`resolveJoinRequest`) and `evaluateAutoApprove` in fixed first-decisive order blocklist → country-code → regex → manual": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606919
+      }
+    ],
+    "22.2 Implement `reconcileMembers` (bridge ground-truth → DB; cache bot-admin status)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606926
+      }
+    ],
+    "22.3 Implement `bulkAddParticipants` as chunked (default 50/chunk), retry-safe, anti-ban-paced queued jobs": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606935
+      }
+    ],
+    "22.4 Implement `sendWelcome`: per-member vs combined, media welcome, dynamic card with text fallback, exactly-once-per-join via `(group_id, jid, join_epoch)` guard (rejoin no-op), template rotation / sticky A-B": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606942
+      }
+    ],
+    "22.5 Implement `extractMembers` (streaming generator, temp-table de-dup on normalized JID, active-number filter) requiring `Extraction` capability + bot-admin": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606950
+      }
+    ],
+    "22.6 Implement `export` to CSV/TXT/JSON/XLSX/vCard under the tenant prefix via a signed expiring URL (canonical Base URL)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606959
+      }
+    ],
+    "22.7 Implement `tagAll/tagSelective`/custom tagging using hidden mentions, 200 mentions/chunk, per-group cooldown, admin-only guarded": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606966
+      }
+    ],
+    "23.1 Create `channel_snapshots` (and reuse `channels`/`newsletters`, `channel_posts`) migrations/models; gate every op with `ChannelRouter::assertSupported($s, Channels)` (Baileys-only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606974
+      }
+    ],
+    "23.2 Implement `ChannelService::create/delete/updateMetadata` (name/description/picture), tenant-scoped": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606983
+      }
+    ],
+    "23.3 Implement `subscribers` (streamed), `addAdmin`/`removeAdmin`, `follow`/`mute`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606990
+      }
+    ],
+    "23.4 Implement `post` (text/media/poll), `schedulePost` (once + recurring), and `calendar` (content-calendar over a date range), anti-ban paced": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921606997
+      }
+    ],
+    "23.5 Implement `analytics` (subscribers/reach/engagement) computed as deltas between stored periodic snapshots, rolled into `metrics_rollup`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607005
+      }
+    ],
+    "23.6 Implement channel member extraction, active-number filtering, and export (CSV/TXT/JSON/XLSX/vCard) via signed expiring URL under the tenant prefix": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607012
+      }
+    ],
+    "24.1 Registration (email + phone OTP) via `Panel\\Auth\\Register` provisioning tenant+wallet+default chatbot+DEK on verify, with disposable-email/velocity anti-fraud": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607020
+      }
+    ],
+    "24.2 Login (email + phone OTP) via `Panel\\Auth\\Login` with throttle+lockout, binding `TenantContext`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607028
+      }
+    ],
+    "24.3 Profile management (`Panel\\Account\\Profile`) with avatar via signed tenant-prefixed URL": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607037
+      }
+    ],
+    "24.4 Subscription/plan view (`Panel\\Account\\Subscription`) with upgrade/downgrade + dunning state": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607044
+      }
+    ],
+    "24.5 Wallet/credits view + gateway top-up (`Panel\\Account\\Wallet`), balance ≥ 0": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607052
+      }
+    ],
+    "24.6 Two-factor auth (`Panel\\Account\\TwoFactor`, TOTP + recovery codes) enforced on next login": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607060
+      }
+    ],
+    "25.1 Connect own number (`Panel\\Sessions\\Connect`) QR/pairing or per-mode credential entry, `SESSIONS` quota-gated": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607067
+      }
+    ],
+    "25.2 View sessions / live status (`Panel\\Sessions\\Index`, `wire:poll`), own sessions only": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607078
+      }
+    ],
+    "25.3 Reconnect / disconnect (`Panel\\Sessions\\Manage`), ownership-checked": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607092
+      }
+    ],
+    "25.4 Choose / view channel mode + per-mode credential entry (`Panel\\Sessions\\ChannelMode`), secret-redacted, envelope-encrypted, disabled-with-hint when creds absent": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607112
+      }
+    ],
+    "26.1 Single/dual send (`Panel\\Messaging\\Compose`), quota + opt-out enforced, over-quota defer notice": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607120
+      }
+    ],
+    "26.2 Bulk campaign (`Panel\\Messaging\\Campaigns`), `CAMPAIGNS_CONCURRENT` + message quota; would-exceed blocked; mid-run exhaustion → `QUOTA_PAUSED` + auto-resume": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607127
+      }
+    ],
+    "26.3 Scheduler once + recurring (`Panel\\Messaging\\Scheduler`), quiet-hours defer, recurrence validated": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607134
+      }
+    ],
+    "26.4 Media library / send (`Panel\\Messaging\\Media`), tenant-prefixed storage; `Media` capability per mode → disabled-with-reason when unsupported": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607142
+      }
+    ],
+    "26.5 Templates use/create/version (`Panel\\Messaging\\Templates`); Cloud API/BSP approval status; Baileys text-templated": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607150
+      }
+    ],
+    "26.6 Delivery status board (`Panel\\Messaging\\Delivery`, `wire:poll`), status never downgrades": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607159
+      }
+    ],
+    "27.1 Contacts manage (`Panel\\Contacts\\Index`), `CONTACTS` quota": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607167
+      }
+    ],
+    "27.2 Import CSV/vCard (`Panel\\Contacts\\Import`, queued/streamed) with de-dup + validation; malformed rows reported, valid rows imported; quota-checked": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607174
+      }
+    ],
+    "27.3 Groups manage (own) (`Panel\\Groups\\Index`) via `GroupService`; official mode → group ops disabled": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607182
+      }
+    ],
+    "27.4 Own-group number extraction (`Panel\\Groups\\Extract`), admin-guarded, `Extraction` capability, streamed": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607189
+      }
+    ],
+    "27.5 Export own data (`Panel\\Contacts\\Export`) CSV/TXT/JSON/XLSX/vCard via signed expiring URL": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607198
+      }
+    ],
+    "28.1 Flow builder (`Panel\\Chatbot\\FlowBuilder`), publish blocked when invalid with failing node highlighted": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607206
+      }
+    ],
+    "28.2 Keyword / FAQ manager (`Panel\\Chatbot\\Keywords`), priority-ordered": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607213
+      }
+    ],
+    "28.3 AI auto-reply toggle (`Panel\\Chatbot\\AiSettings`); credits 0 → LLM skipped → FAQ/fallback; not-in-plan → hidden/disabled": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607221
+      }
+    ],
+    "28.4 Away / business-hours (`Panel\\Chatbot\\BusinessHours`), timezone-aware": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607228
+      }
+    ],
+    "29.1 Campaign analytics + conversation reports (`Panel\\Reports\\Analytics`) from `metrics_rollup`, own aggregates only": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607237
+      }
+    ],
+    "29.2 Error logs (phone-redacted) + notifications inbox (`Panel\\Reports\\Errors`, `Panel\\Notifications\\Inbox`); retry updates original row": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607245
+      }
+    ],
+    "29.3 Support ticket / help center + billing history & invoices (`Panel\\Support\\Tickets`, `Panel\\Account\\Invoices`); ticket routed to platform support; invoices via signed URL": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607253
+      }
+    ],
+    "30.1 Distinct `platform-admin` guard + `actingAsPlatform()` mode + middleware `[auth:platform-admin, ip.allowlist, admin.throttle, audit]`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607261
+      }
+    ],
+    "30.2 CRUD/suspend all users (`Admin\\Users\\Index`) cross-tenant, audited": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607269
+      }
+    ],
+    "30.3 CRUD/suspend all tenants (`Admin\\Tenants\\Index`) via `TenantLifecycle`, audited": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607279
+      }
+    ],
+    "30.4 RBAC roles owner/admin/operator/viewer/agent (`Admin\\Access\\Roles`) via `RbacService`, audited": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607286
+      }
+    ],
+    "30.5 Impersonate / login-as (`Admin\\Users\\Impersonate`) — banner, time-boxed, destructive-op block, fully audited": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607294
+      }
+    ],
+    "30.6 Audit-log viewer (`Admin\\Audit\\Index`) with hash-chain verification": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607302
+      }
+    ],
+    "30.7 Login security (`Admin\\Security\\Login`) — IP allowlist / throttle / lockout for the admin panel": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607309
+      }
+    ],
+    "31.1 Create/manage plans & pricing (`Admin\\Plans\\Index`), version-bump cache invalidation": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607318
+      }
+    ],
+    "31.2 Feature limits per plan (`Admin\\Plans\\Limits`) driving `PlanGate`/`QuotaGuard`": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607325
+      }
+    ],
+    "31.3 Payment gateway config (`Admin\\Billing\\Gateways`), secrets redacted, never exposed to tenants": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607333
+      }
+    ],
+    "31.4 Wallet/credit top-ups (`Admin\\Billing\\Wallets`), idempotent, logged": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607341
+      }
+    ],
+    "31.5 Coupons/discounts (`Admin\\Billing\\Coupons`) with redemption limits": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607348
+      }
+    ],
+    "31.6 Invoices & revenue reports (`Admin\\Billing\\Revenue`) from replica/rollup": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607357
+      }
+    ],
+    "31.7 Per-tenant cost attribution (`llm_usage` + message counts + storage) rolled up for margin analysis, optionally billed against `AI_CREDITS`/wallet": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607365
+      }
+    ],
+    "32.1 Global session monitor (`Admin\\Monitor\\Sessions`, `wire:poll`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607373
+      }
+    ],
+    "32.2 Global campaign & queue monitor (`Admin\\Monitor\\Queues`) with backpressure/shedding controls": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607380
+      }
+    ],
+    "32.3 Global anti-ban / rate-limit floor (`Admin\\Control\\AntiBan`) applied as a floor tenants cannot loosen": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607386
+      }
+    ],
+    "32.4 Broadcast announcements (`Admin\\Control\\Announcements`) with audience segment targeting": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607396
+      }
+    ],
+    "32.5 Feature flags (`Admin\\Control\\FeatureFlags`) global or per-tenant override": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607404
+      }
+    ],
+    "32.6 System settings (`Admin\\Control\\Settings`: SMTP/API/LLM/gateway keys, defaults, base URL), secret-redacted, never returned raw": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607411
+      }
+    ],
+    "33.1 Health dashboard (`Admin\\Health\\Dashboard`: server/bridge/queue traffic-light)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607418
+      }
+    ],
+    "33.2 Global error center & dedup alerts (`Admin\\Health\\Errors`, `alerts.fingerprint`) linked to runbooks": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607426
+      }
+    ],
+    "33.3 Per-user & platform usage analytics (`Admin\\Analytics\\Usage`) from replica/warehouse, no live-table scans": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607436
+      }
+    ],
+    "33.4 Prometheus metrics endpoint (`MetricsController`, `GET /metrics`, `wacb_*`) scrape-auth restricted": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607444
+      }
+    ],
+    "34.1 Global templates library (`Admin\\Content\\Templates`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607454
+      }
+    ],
+    "34.2 Opt-out / blocklist management (`Admin\\Compliance\\Blocklist`), non-bypassable across tenants": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607467
+      }
+    ],
+    "34.3 Data retention & right-to-delete (`Admin\\Compliance\\Retention`): scheduled purge across OLTP, vector store, object storage, analytics + verification pass + signed deletion certificate to audit log": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607481
+      }
+    ],
+    "34.4 ToS enforcement (`Admin\\Compliance\\Tos`) with per-session risk kill-switch": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607496
+      }
+    ],
+    "35.1 Ticket management (`Admin\\Support\\Tickets`) assign/close/SLA, audited": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607505
+      }
+    ],
+    "35.2 KB/FAQ manager + segment notifications (`Admin\\Support\\Kb`, `Admin\\Support\\Notify`) delivering only to the targeted audience": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607512
+      }
+    ],
+    "36.1 Implement time-RANGE monthly partitioning on `messages`, `messages_inbound`, `event_log`, `flow_analytics_events`, `llm_usage` with pre-created partitions and `DROP PARTITION` retention": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607519
+      }
+    ],
+    "36.2 Implement the tenant-sharding path keyed by `tenant_tiers.shard_key` via `TierResolver::connection` (consistent-hash router)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607526
+      }
+    ],
+    "36.3 Implement the documented Redis drop-in upgrade for queue/cache/locks/rate-buckets/broadcast with MySQL auto-fallback when Redis is absent": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607535
+      }
+    ],
+    "36.4 Implement per-lane queue workers (`transactional`/`ai-reply`/`welcome`/`campaign`/`extraction`) with prefetch=1, backpressure shedding, and autoscale signals (`queue_depth`/`job_age_seconds`/`worker_busy_ratio`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607542
+      }
+    ],
+    "36.5 Implement per-tenant in-flight AI concurrency caps and skip-rate-capped-tenant dispatch (noisy-neighbor bound)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607550
+      }
+    ],
+    "36.6 Implement versioned caching layers (config/flags, tenant settings, hot flows, prompt templates, semantic cache, retrieval) with version-bump invalidation and a read-replica connection (`useReadPdo`) for analytics": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607558
+      }
+    ],
+    "37.1 Create `event_log` (append-only; revoke UPDATE/DELETE; `uniq(stream_id, version)`) and `projection_checkpoints`; record conversation/messaging/order/session lifecycle events with monotonic per-stream versioning": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607566
+      }
+    ],
+    "37.2 Implement projectors rebuilding read models (`conversations`, `orders`) from `event_log` with checkpoint tracking": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607579
+      }
+    ],
+    "37.3 Implement CDC/ETL from `event_log` (or binlog) into a warehouse or MySQL analytics replica; incremental `metrics_rollup`; batch historical reports off live tables": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607587
+      }
+    ],
+    "37.4 Implement the star-schema reporting model (facts `fact_messages`/`fact_conversations`/`fact_orders`/`fact_llm_usage`; dims `dim_tenant`/`dim_date`/`dim_chatbot`/`dim_channel`/`dim_agent`) computing funnels/retention/revenue/deflection/handoff/CSAT/sentiment from replica/warehouse": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607595
+      }
+    ],
+    "38.1 Create `traces`, `metrics_rollup`, `alerts` migrations/models; implement `Tracer` (`startSpan`/`currentTraceId`) and `Metrics` (`increment`/`observe`/`gauge`)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607603
+      }
+    ],
+    "38.2 Propagate `trace_id` panel → job → bridge → webhook and attach it to every structured log line and span (phone-redacted, bodies hashed only)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607611
+      }
+    ],
+    "38.3 Implement the `wacb_*` metrics taxonomy exported at `/metrics` and define SLO/SLI targets + error budgets per subsystem": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607619
+      }
+    ],
+    "38.4 Implement deduplicated alerting (`alerts.fingerprint`) for breaker OPEN / queue-age / replica-lag / payment-failure / session-disconnect-storm, each linked to a runbook": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607627
+      }
+    ],
+    "38.5 Implement blue-green/rolling FPM pools with graceful worker draining, expand-contract migrations, and feature-flag canary rollout with pool-swap rollback": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607635
+      }
+    ],
+    "38.6 Implement disaster-recovery tooling: nightly full + continuous binlog PITR, per-tenant encrypted auth-state backup, documented restore order, meeting RPO ≤5m / RTO ≤30m": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607644
+      }
+    ],
+    "39.1 Implement graceful-degradation matrix code paths (LLM/vector/bridge/gateway/Redis/KMS/STT/Cloud-API each degrading to a real MySQL/Baileys default, not a stub)": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607652
+      }
+    ],
+    "39.2 Configure Supervisor (worker per lane incl. `ai-reply`), single cron `schedule:run`, and document the Redis upgrade path": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607661
+      }
+    ],
+    "39.3 Ensure every feature is tenant-scoped, plan-gated & quota-metered, capability-aware, typed-exception error-handled, observable (`trace_id` + `wacb_*`), and covered by tests": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607673
+      }
+    ],
+    "39.6 Checkpoint — Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "39272c1e-a377-4c8c-9e41-338a6a9fedb5",
+        "chatSessionId": "5802023e-6995-4948-b358-d9d5846cd761",
+        "timestamp": 1788921607681
+      }
+    ]
+  }
+}

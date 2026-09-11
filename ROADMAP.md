@@ -2,7 +2,7 @@
 
 **Total Phases:** 31 (Phase 0 → Phase 30)
 **Total Features Covered:** 37
-**Stack:** PHP 8.3 · Laravel 11 · MySQL 8 · Livewire 3 + Blade + Tailwind · Supervisor · nginx + PHP-FPM
+**Stack:** PHP 8.3 · Laravel 12 · MySQL 8 · Livewire 3 + Blade + Tailwind · Supervisor · nginx + PHP-FPM
 **Deployment:** `https://bot.getxtrra.in`
 **Default admin:** `admin` / `admin` (forced change on first login — see Phase 25)
 
@@ -124,7 +124,7 @@ Legend — **Effort:** S (≤1 din) · M (2–3 din) · L (4–6 din) · XL (1�
 
 #### Phase 0 — Laravel Bootstrap
 **Effort:** S | **Features:** infrastructure
-- Laravel 11 + PHP 8.3, Pest/Pint/PHPStan, package install
+- Laravel 12 + PHP 8.3, Pest/Pint/PHPStan, package install
 - MySQL-only drivers: `QUEUE_CONNECTION=database`, `CACHE_STORE=database`, `SESSION_DRIVER=database`
 - `config/wa.php` — delays, rate limits, warm-up ramp, quiet hours, media caps, bridge url/token
 - Monolog JSON logging with **phone-number redaction**
